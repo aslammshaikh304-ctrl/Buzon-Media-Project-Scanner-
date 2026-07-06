@@ -2,7 +2,7 @@ const express = require("express");
 
 const { scanWebsite } = require("./scanner");
 const { saveScanResult } = require("./storage");
-
+const { runScheduledScans } = require("./scheduler");
 const app = express();
 
 app.use(express.json());
@@ -63,4 +63,10 @@ app.listen(PORT, () => {
   console.log(
     `BUZON Scanner running on http://localhost:${PORT}`
   );
+
+  runScheduledScans();
+
+  setInterval(() => {
+    runScheduledScans();
+  }, 60 * 1000);
 });
