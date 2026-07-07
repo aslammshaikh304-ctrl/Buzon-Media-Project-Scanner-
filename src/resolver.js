@@ -8,198 +8,349 @@ function getHostname(value) {
   }
 }
 
-function isIgnoredDomain(value) {
+function getRootDomain(value) {
   const hostname = getHostname(value);
 
-  if (!hostname) return true;
+  if (!hostname) {
+    return null;
+  }
 
-  const ignoredDomains = [
+  const parts = hostname.split(".");
+
+  if (parts.length < 2) {
+    return hostname;
+  }
+
+  const secondLevelDomains = new Set([
+    "co.uk",
+    "com.au",
+    "co.in",
+    "co.jp",
+    "com.br",
+    "com.sg",
+    "com.mx",
+    "co.nz",
+  ]);
+
+  const lastTwo = parts
+    .slice(-2)
+    .join(".");
+
+  if (
+    secondLevelDomains.has(lastTwo) &&
+    parts.length >= 3
+  ) {
+    return parts.slice(-3).join(".");
+  }
+
+  return lastTwo;
+}
+
+function cleanAdvertiserName(value) {
+  if (!value) {
+    return null;
+  }
+
+  const cleaned = String(value)
+    .replace(/^www\./i, "")
+    .replace(
+      /\.(com|io|co|net|org|ai|app|xyz|care)$/i,
+      ""
+    )
+    .replace(/[-_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+
+  if (!cleaned || cleaned.length < 2) {
+    return null;
+  }
+
+  if (/^\d+$/.test(cleaned)) {
+    return null;
+  }
+
+  return cleaned;
+}
+
+function getAdvertiserNameFromUrl(value) {
+  const rootDomain = getRootDomain(value);
+
+  if (!rootDomain) {
+    return null;
+  }
+
+  return cleanAdvertiserName(
+    rootDomain.split(".")[0]
+  );
+}
+
+function isSameDomain(
+  value,
+  publisherDomain
+) {
+  const hostname = getHostname(value);
+
+  if (!hostname || !publisherDomain) {
+    return false;
+  }
+
+  const normalizedPublisher =
+    publisherDomain
+      .replace(/^www\./, "")
+      .toLowerCase();
+
+  return (
+    hostname === normalizedPublisher ||
+    hostname.endsWith(
+      `.${normalizedPublisher}`
+    )
+  );
+}
+
+function isAdTechDomain(value) {
+  const hostname = getHostname(value);
+
+  if (!hostname) {
+    return true;
+  }
+
+  const domains = [
     "servedbyadbutler.com",
     "adbutler.com",
-    "googleapis.com",
-    "gstatic.com",
-    "google.com",
-    "googleusercontent.com",
-    "cloudflare.com",
-    "cloudflareinsights.com",
     "doubleclick.net",
     "googlesyndication.com",
     "googleadservices.com",
-    "facebook.com",
-    "facebook.net",
-    "twitter.com",
-    "x.com",
-    "jsdelivr.net",
-    "cdnjs.com",
-    "unpkg.com",
     "adnxs.com",
     "taboola.com",
     "outbrain.com",
     "adform.net",
+    "czilladx.com",
+    "request-global.czilladx.com",
   ];
 
-  return ignoredDomains.some(
+  return domains.some(
     (domain) =>
       hostname === domain ||
       hostname.endsWith(`.${domain}`)
   );
 }
 
-function isValidAdvertiserUrl(value) {
+function isIgnoredFinalDomain(value) {
+  const hostname = getHostname(value);
+
+  if (!hostname) {
+    return true;
+  }
+
+  const domains = [
+    "google.com",
+    "googleapis.com",
+    "gstatic.com",
+    "googleusercontent.com",
+    "cloudflare.com",
+    "cloudflareinsights.com",
+    "facebook.com",
+    "facebook.net",
+    "twitter.com",
+    "x.com",
+    "youtube.com",
+    "youtu.be",
+    "jsdelivr.net",
+    "cdnjs.com",
+    "unpkg.com",
+  ];
+
+  return domains.some(
+    (domain) =>
+      hostname === domain ||
+      hostname.endsWith(`.${domain}`)
+  );
+}
+
+function isValidFinalUrl(
+  value,
+  publisherDomain
+) {
   return (
     /^https?:\/\//i.test(value || "") &&
-    !isIgnoredDomain(value)
+    !isSameDomain(value, publisherDomain) &&
+    !isAdTechDomain(value) &&
+    !isIgnoredFinalDomain(value)
   );
 }
 
-function withTimeout(
-  promise,
-  timeoutMs = 12000
-) {
-  let timeoutId;
+function extractNestedUrls(value) {
+  const results = [];
 
-  const timeoutPromise = new Promise(
-    (resolve) => {
-      timeoutId = setTimeout(
-        () => resolve(null),
-        timeoutMs
-      );
+  if (!value) {
+    return results;
+  }
+
+  let current = String(value);
+
+  for (let i = 0; i < 5; i++) {
+    try {
+      current = decodeURIComponent(current);
+    } catch {
+      // Stop decoding.
     }
-  );
 
-  return Promise.race([
-    promise,
-    timeoutPromise,
-  ]).finally(() => {
-    clearTimeout(timeoutId);
-  });
+    const matches = current.match(
+      /https?:\/\/[^\s"'<>]+/gi
+    );
+
+    if (matches) {
+      for (const match of matches) {
+        const cleaned = match
+          .replace(/[),\]}]+$/g, "");
+
+        if (!results.includes(cleaned)) {
+          results.push(cleaned);
+        }
+      }
+    }
+  }
+
+  return results;
 }
 
-async function resolveByAdClick(
-  page,
-  advertiser
+async function resolveViaRequest(
+  context,
+  url,
+  publisherDomain
 ) {
-  const originalLandingPage =
-    advertiser.originalLandingPage ||
-    advertiser.landingPage;
-
-  if (!originalLandingPage) {
+  if (!url) {
     return null;
   }
 
-  let adPage = null;
-
   try {
-    adPage = await page.context().newPage();
-
-    await adPage.goto(originalLandingPage, {
-      waitUntil: "domcontentloaded",
-      timeout: 10000,
-    });
-
-    await adPage.waitForTimeout(1500);
-
-    const beforeClickUrl = adPage.url();
-
-    if (
-      beforeClickUrl !== originalLandingPage &&
-      isValidAdvertiserUrl(beforeClickUrl)
-    ) {
-      return beforeClickUrl;
-    }
-
-    const links = adPage.locator("a[href]");
-    const linkCount = await links.count();
-
-    for (
-      let index = 0;
-      index < Math.min(linkCount, 10);
-      index++
-    ) {
-      try {
-        const href = await links
-          .nth(index)
-          .getAttribute("href");
-
-        if (!href) continue;
-
-        const absoluteUrl = new URL(
-          href,
-          adPage.url()
-        ).href;
-
-        if (
-          isValidAdvertiserUrl(absoluteUrl)
-        ) {
-          return absoluteUrl;
-        }
-      } catch {
-        // Ignore invalid link.
-      }
-    }
-
-    const popupPromise = adPage
-      .waitForEvent("popup", {
-        timeout: 5000,
-      })
-      .catch(() => null);
-
-    const viewport = await adPage.evaluate(
-      () => ({
-        width: window.innerWidth,
-        height: window.innerHeight,
-      })
+    console.log(
+      "Direct redirect request:",
+      url.slice(0, 300)
     );
 
-    await adPage.mouse
-      .click(
-        Math.floor(viewport.width / 2),
-        Math.floor(viewport.height / 2)
-      )
-      .catch(() => null);
+    const response =
+      await context.request.get(url, {
+        timeout: 20000,
+        failOnStatusCode: false,
+        maxRedirects: 15,
+      });
 
-    const popup = await popupPromise;
+    const finalUrl = response.url();
 
-    if (popup) {
-      await popup
-        .waitForLoadState("domcontentloaded", {
-          timeout: 7000,
-        })
-        .catch(() => null);
-
-      const popupUrl = popup.url();
-
-      await popup.close().catch(() => null);
-
-      if (isValidAdvertiserUrl(popupUrl)) {
-        return popupUrl;
-      }
-    }
-
-    await adPage.waitForTimeout(1500);
-
-    const afterClickUrl = adPage.url();
+    console.log(
+      "Request final URL:",
+      finalUrl
+    );
 
     if (
-      afterClickUrl !== originalLandingPage &&
-      isValidAdvertiserUrl(afterClickUrl)
+      isValidFinalUrl(
+        finalUrl,
+        publisherDomain
+      )
     ) {
-      return afterClickUrl;
+      return finalUrl;
+    }
+  } catch (error) {
+    console.log(
+      "Direct request failed:",
+      error.message
+    );
+  }
+
+  return null;
+}
+
+async function resolveViaPage(
+  context,
+  url,
+  publisherDomain
+) {
+  if (!url) {
+    return null;
+  }
+
+  let resolverPage;
+
+  try {
+    resolverPage = await context.newPage();
+
+    const navigationUrls = [];
+
+    const captureRequest = (request) => {
+      try {
+        if (
+          request.isNavigationRequest() &&
+          request.resourceType() === "document"
+        ) {
+          navigationUrls.push(
+            request.url()
+          );
+        }
+      } catch {
+        // Ignore.
+      }
+    };
+
+    resolverPage.on(
+      "request",
+      captureRequest
+    );
+
+    await resolverPage
+      .goto(url, {
+        waitUntil: "domcontentloaded",
+        timeout: 30000,
+      })
+      .catch(() => null);
+
+    await resolverPage.waitForTimeout(5000);
+
+    navigationUrls.push(
+      resolverPage.url()
+    );
+
+    console.log(
+      "Page navigation URLs:",
+      navigationUrls
+    );
+
+    const validUrls = navigationUrls.filter(
+      (candidateUrl) =>
+        isValidFinalUrl(
+          candidateUrl,
+          publisherDomain
+        )
+    );
+
+    if (validUrls.length) {
+      return validUrls[
+        validUrls.length - 1
+      ];
     }
 
     return null;
-  } catch {
+  } catch (error) {
+    console.log(
+      "Resolver page failed:",
+      error.message
+    );
+
     return null;
   } finally {
-    if (adPage) {
-      await adPage.close().catch(() => null);
+    if (resolverPage) {
+      await resolverPage
+        .close()
+        .catch(() => null);
     }
   }
 }
 
 async function resolveSingleAdvertiser(
   page,
-  advertiser
+  advertiser,
+  publisherDomain
 ) {
   if (advertiser.type !== "banner_ad") {
     return advertiser;
@@ -209,18 +360,86 @@ async function resolveSingleAdvertiser(
     advertiser.originalLandingPage ||
     advertiser.landingPage;
 
-  const resolvedLandingPage =
-    await withTimeout(
-      resolveByAdClick(page, advertiser),
-      12000
+  console.log(
+    "\nResolving advertiser:",
+    advertiser.advertiserName
+  );
+
+  console.log(
+    "Original URL:",
+    originalLandingPage
+  );
+
+  const context = page.context();
+
+  const nestedUrls = extractNestedUrls(
+    originalLandingPage
+  );
+
+  console.log(
+    "Nested URLs:",
+    nestedUrls
+  );
+
+  for (
+    const nestedUrl of nestedUrls.reverse()
+  ) {
+    if (
+      isValidFinalUrl(
+        nestedUrl,
+        publisherDomain
+      )
+    ) {
+      console.log(
+        "Resolved from nested URL:",
+        nestedUrl
+      );
+
+      return {
+        ...advertiser,
+        advertiserName:
+          getAdvertiserNameFromUrl(
+            nestedUrl
+          ),
+        originalLandingPage,
+        landingPage: nestedUrl,
+        landingPageResolved: true,
+      };
+    }
+  }
+
+  let resolvedLandingPage =
+    await resolveViaRequest(
+      context,
+      originalLandingPage,
+      publisherDomain
     );
+
+  if (!resolvedLandingPage) {
+    resolvedLandingPage =
+      await resolveViaPage(
+        context,
+        originalLandingPage,
+        publisherDomain
+      );
+  }
+
+  console.log(
+    "Resolved landing page:",
+    resolvedLandingPage
+  );
 
   return {
     ...advertiser,
+    advertiserName:
+      resolvedLandingPage
+        ? getAdvertiserNameFromUrl(
+            resolvedLandingPage
+          )
+        : advertiser.advertiserName,
     originalLandingPage,
     landingPage:
-      resolvedLandingPage ||
-      advertiser.landingPage,
+      resolvedLandingPage || null,
     landingPageResolved:
       Boolean(resolvedLandingPage),
   };
@@ -228,34 +447,59 @@ async function resolveSingleAdvertiser(
 
 async function resolveAdvertiserLandingPages(
   page,
-  advertisers = []
+  advertisers = [],
+  publisherDomain = null
 ) {
-  const concurrency = 5;
   const results = [];
 
-  for (
-    let index = 0;
-    index < advertisers.length;
-    index += concurrency
-  ) {
-    const batch = advertisers.slice(
-      index,
-      index + concurrency
-    );
+  for (const advertiser of advertisers) {
+    const result =
+      await resolveSingleAdvertiser(
+        page,
+        advertiser,
+        publisherDomain
+      );
 
-    const batchResults = await Promise.all(
-      batch.map((advertiser) =>
-        resolveSingleAdvertiser(
-          page,
-          advertiser
-        )
-      )
-    );
-
-    results.push(...batchResults);
+    results.push(result);
   }
 
-  return results;
+  const seen = new Set();
+
+  return results.filter((advertiser) => {
+    if (advertiser.type !== "banner_ad") {
+      return true;
+    }
+
+    if (
+      !advertiser.landingPageResolved ||
+      !advertiser.landingPage
+    ) {
+      return false;
+    }
+
+    const rootDomain = getRootDomain(
+      advertiser.landingPage
+    );
+
+    if (!rootDomain) {
+      return false;
+    }
+
+    const key = [
+      advertiser.type,
+      rootDomain,
+    ]
+      .join("|")
+      .toLowerCase();
+
+    if (seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+
+    return true;
+  });
 }
 
 module.exports = {

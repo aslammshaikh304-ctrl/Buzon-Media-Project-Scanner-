@@ -18,66 +18,345 @@ function getDomain(value) {
   }
 }
 
+function isSameDomain(domain, publisherDomain) {
+  if (!domain || !publisherDomain) {
+    return false;
+  }
+
+  return (
+    domain === publisherDomain ||
+    domain.endsWith(`.${publisherDomain}`)
+  );
+}
+
+const GARBAGE_NAMES = new Set([
+  "index",
+  "home",
+  "news",
+  "crypto",
+  "world",
+  "submit",
+  "review",
+  "reviews",
+  "press",
+  "release",
+  "article",
+  "sponsored",
+  "sponsor",
+  "sponsors",
+  "premium sponsor",
+  "premium sponsors",
+  "advertisement",
+  "advertising",
+  "advert",
+  "banner",
+  "creative",
+  "click",
+  "redirect",
+  "unknown",
+  "null",
+  "cp",
+  "image",
+  "images",
+  "img",
+  "imagex",
+  "asset",
+  "assets",
+  "static",
+  "cdn",
+  "media",
+  "upload",
+  "uploads",
+  "account",
+  "accounts",
+  "login",
+  "signin",
+  "signup",
+  "register",
+  "stage",
+  "staging",
+  "exclusive",
+]);
+
+const GENERIC_NAME_WORDS = new Set([
+  "sponsor",
+  "sponsors",
+  "sponsored",
+  "advert",
+  "advertisement",
+  "advertising",
+  "banner",
+  "creative",
+  "image",
+  "images",
+  "asset",
+  "assets",
+  "static",
+  "cdn",
+  "media",
+  "account",
+  "accounts",
+  "login",
+  "signin",
+  "signup",
+  "register",
+]);
+
+const TRACKING_DOMAINS = [
+  "servedbyadbutler.com",
+  "adbutler.com",
+  "doubleclick.net",
+  "googlesyndication.com",
+  "googleadservices.com",
+  "adnxs.com",
+  "taboola.com",
+  "outbrain.com",
+  "adform.net",
+];
+
 function cleanCompanyName(value) {
   if (!value) {
     return null;
   }
 
-  return normalizeText(value)
+  const cleaned = normalizeText(value)
     .replace(/\.(com|io|co|net|org|ai)$/i, "")
     .replace(/[-_]+/g, " ")
-    .replace(/\b\d{2,4}\s*[xX]\s*\d{2,4}\b/g, "")
+    .replace(
+      /\b\d{2,4}\s*[xX]\s*\d{2,4}\b/g,
+      ""
+    )
     .replace(/\b(www|https|http)\b/gi, "")
+    .replace(/\b(index|html?|php)\b/gi, "")
+    .replace(/[^\w\s.&'-]/g, " ")
+    .replace(/\s+/g, " ")
     .trim()
     .slice(0, 120);
+
+  if (!cleaned || cleaned.length < 2) {
+    return null;
+  }
+
+  if (/^\d+$/.test(cleaned)) {
+    return null;
+  }
+
+  if (/^x\d+$/i.test(cleaned)) {
+    return null;
+  }
+
+  return cleaned;
+}
+
+function isValidAdvertiserName(value) {
+  const cleaned = cleanCompanyName(value);
+
+  if (!cleaned) {
+    return false;
+  }
+
+  const normalized = cleaned.toLowerCase();
+
+  if (GARBAGE_NAMES.has(normalized)) {
+    return false;
+  }
+
+  const words = normalized
+    .split(/\s+/)
+    .filter(Boolean);
+
+  if (
+    words.length > 0 &&
+    words.every((word) =>
+      GENERIC_NAME_WORDS.has(word)
+    )
+  ) {
+    return false;
+  }
+
+  if (
+    /^(img|image|asset|cdn|static)\d*$/i.test(
+      normalized
+    )
+  ) {
+    return false;
+  }
+
+  if (
+    /^(stage|staging)\d*$/i.test(normalized)
+  ) {
+    return false;
+  }
+
+  if (
+    /^[a-f0-9]{12,}$/i.test(normalized)
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function validateAdvertiserName(value) {
+  const cleaned = cleanCompanyName(value);
+
+  if (!isValidAdvertiserName(cleaned)) {
+    return null;
+  }
+
+  return cleaned;
+}
+
+function isTrackingDomain(domain) {
+  if (!domain) {
+    return false;
+  }
+
+  return TRACKING_DOMAINS.some(
+    (trackingDomain) =>
+      domain === trackingDomain ||
+      domain.endsWith(`.${trackingDomain}`)
+  );
+}
+
+function getRootDomainName(domain) {
+  if (!domain) {
+    return null;
+  }
+
+  const parts = domain.split(".");
+
+  if (parts.length < 2) {
+    return null;
+  }
+
+  const commonSecondLevelDomains = new Set([
+    "co.uk",
+    "com.au",
+    "co.in",
+    "co.jp",
+    "com.br",
+    "com.sg",
+    "com.mx",
+    "co.nz",
+  ]);
+
+  const lastTwoParts = parts
+    .slice(-2)
+    .join(".");
+
+  if (
+    commonSecondLevelDomains.has(lastTwoParts) &&
+    parts.length >= 3
+  ) {
+    return parts[parts.length - 3];
+  }
+
+  return parts[parts.length - 2];
+}
+
+function extractNameFromDomain(value) {
+  const domain = getDomain(value);
+
+  if (!domain || isTrackingDomain(domain)) {
+    return null;
+  }
+
+  const domainPart = getRootDomainName(domain);
+
+  return validateAdvertiserName(domainPart);
 }
 
 function extractAdvertiserFromAdUrl(candidate) {
   const urls = [
-    candidate.href,
-    candidate.iframeSrc,
-  ].filter(Boolean);
+  candidate.href,
+  candidate.iframeSrc,
+  candidate.frameUrl,
+].filter(Boolean);
 
   for (const value of urls) {
     try {
-      const decoded = decodeURIComponent(value);
+      let decoded = value;
 
-      const creativeMatch = decoded.match(
-        /creative[^/]*\/([^/?&#]+)/i
+      for (
+        let index = 0;
+        index < 3;
+        index += 1
+      ) {
+        try {
+          const nextDecoded =
+            decodeURIComponent(decoded);
+
+          if (nextDecoded === decoded) {
+            break;
+          }
+
+          decoded = nextDecoded;
+        } catch {
+          break;
+        }
+      }
+
+      const metadataMatch = decoded.match(
+        /__ab_advertiser_name=([^&\\]+)/i
       );
 
-      if (creativeMatch?.[1]) {
-        const possibleName = creativeMatch[1]
-          .replace(/^\d+[-_]?/, "")
-          .replace(/\.(html?|php)$/i, "");
+      if (metadataMatch?.[1]) {
+        const metadataName =
+          validateAdvertiserName(
+            metadataMatch[1]
+          );
 
-        if (
-          possibleName &&
-          !/^\d+$/.test(possibleName)
-        ) {
-          return cleanCompanyName(possibleName);
+        if (metadataName) {
+          return metadataName;
         }
       }
 
       const clickTagMatch = decoded.match(
-        /clickTag=([^&]+)/i
+        /clickTag=([^&\\]+)/i
       );
 
       if (clickTagMatch?.[1]) {
-        const clickUrl = decodeURIComponent(
-          clickTagMatch[1]
-        );
+        let clickUrl = clickTagMatch[1];
 
-        const domain = getDomain(clickUrl);
+        try {
+          clickUrl =
+            decodeURIComponent(clickUrl);
+        } catch {
+          // Keep original value.
+        }
 
-        if (domain) {
-          return cleanCompanyName(
-            domain.split(".")[0]
-          );
+        const domainName =
+          extractNameFromDomain(clickUrl);
+
+        if (domainName) {
+          return domainName;
         }
       }
+
+      const creativeMatch = decoded.match(
+        /creative[^/]*\/(?:\d+[-_]?)?([^/?&#]+)/i
+      );
+
+      if (creativeMatch?.[1]) {
+        const creativeName =
+          validateAdvertiserName(
+            creativeMatch[1]
+          );
+
+        if (creativeName) {
+          return creativeName;
+        }
+      }
+
+      const directDomainName =
+        extractNameFromDomain(value);
+
+      if (directDomainName) {
+        return directDomainName;
+      }
     } catch {
-      // Ignore malformed tracking URLs.
+      // Ignore malformed ad URLs.
     }
   }
 
@@ -100,18 +379,33 @@ function extractArticleAdvertiser(candidate) {
   ];
 
   for (const label of publisherLabels) {
-    if (text.toUpperCase().startsWith(label)) {
-      text = text.slice(label.length).trim();
+    if (
+      text.toUpperCase().startsWith(label)
+    ) {
+      text = text
+        .slice(label.length)
+        .trim();
+
       break;
     }
   }
 
-  const firstWord = text.match(
-    /^([A-Z][A-Za-z0-9.-]{1,50})\b/
-  );
+  const patterns = [
+    /^([A-Z][A-Za-z0-9.&'-]+\s+[A-Z][A-Za-z0-9.&'-]+)\s+(?:Launches|Introduces|Announces|Unveils|Partners|Raises|Secures|Expands|Releases)\b/,
+    /^([A-Z][A-Za-z0-9.&'-]+)\s+(?:Launches|Introduces|Announces|Unveils|Partners|Raises|Secures|Expands|Releases)\b/,
+  ];
 
-  if (firstWord?.[1]) {
-    return cleanCompanyName(firstWord[1]);
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+
+    if (match?.[1]) {
+      const companyName =
+        validateAdvertiserName(match[1]);
+
+      if (companyName) {
+        return companyName;
+      }
+    }
   }
 
   return null;
@@ -167,20 +461,10 @@ function detectBanner(candidate) {
     .join(" ")
     .toLowerCase();
 
-  const adNetworks = [
-    "servedbyadbutler",
-    "doubleclick",
-    "googlesyndication",
-    "googleadservices",
-    "adnxs",
-    "taboola",
-    "outbrain",
-    "adform",
-  ];
-
-  const networkSignal = adNetworks.some(
-    (network) => combined.includes(network)
-  );
+  const networkSignal =
+    TRACKING_DOMAINS.some((network) =>
+      combined.includes(network)
+    );
 
   return (
     networkSignal ||
@@ -227,7 +511,8 @@ function calculateConfidence({
 }
 
 function classifyCandidate(candidate) {
-  const articleType = detectArticleType(candidate);
+  const articleType =
+    detectArticleType(candidate);
 
   let type = null;
 
@@ -251,8 +536,13 @@ function classifyCandidate(candidate) {
       extractArticleAdvertiser(candidate);
   }
 
+  advertiserName =
+    validateAdvertiserName(advertiserName);
+
   const landingPage =
-    candidate.href || candidate.iframeSrc || null;
+    candidate.href ||
+    candidate.iframeSrc ||
+    null;
 
   const confidence = calculateConfidence({
     candidate,
@@ -260,23 +550,37 @@ function classifyCandidate(candidate) {
     advertiserName,
   });
 
-  return {
+    return {
+    candidateId:
+      candidate.candidateId || null,
+    frameUrl:
+      candidate.frameUrl || null,
     type,
     advertiserName,
     landingPage,
-    creativeUrl: candidate.imageUrl || null,
-    sourceText: normalizeText(candidate.text).slice(
-      0,
-      500
-    ),
+    originalLandingPage:
+      candidate.href ||
+      candidate.iframeSrc ||
+      null,
+    creativeUrl:
+      candidate.imageUrl || null,
+    sourceText: normalizeText(
+      candidate.text
+    ).slice(0, 500),
     confidence,
     candidateScore: candidate.score,
   };
 }
 
-function classifyCandidates(candidates = []) {
+function classifyCandidates(
+  candidates = [],
+  publisherDomain = null
+) {
   const results = [];
   const seen = new Set();
+
+  const publisherName =
+    getRootDomainName(publisherDomain);
 
   for (const candidate of candidates) {
     const classification =
@@ -286,11 +590,70 @@ function classifyCandidates(candidates = []) {
       continue;
     }
 
-    const uniqueKey = [
-      classification.type,
-      classification.advertiserName,
-      classification.landingPage,
-    ].join("|");
+    const hrefDomain = getDomain(
+      candidate.href
+    );
+
+    const iframeDomain = getDomain(
+      candidate.iframeSrc
+    );
+
+    const candidateUsesTrackingNetwork =
+      isTrackingDomain(hrefDomain) ||
+      isTrackingDomain(iframeDomain);
+
+    if (
+      classification.type === "banner_ad" &&
+      isSameDomain(
+        hrefDomain,
+        publisherDomain
+      ) &&
+      !candidateUsesTrackingNetwork
+    ) {
+      continue;
+    }
+
+    classification.advertiserName =
+      validateAdvertiserName(
+        classification.advertiserName
+      );
+
+    if (
+      classification.advertiserName &&
+      publisherName &&
+      classification.advertiserName
+        .toLowerCase() ===
+        publisherName.toLowerCase()
+    ) {
+      classification.advertiserName = null;
+    }
+
+    if (
+      classification.type !== "banner_ad" &&
+      !classification.advertiserName
+    ) {
+      continue;
+    }
+
+    if (
+  classification.type === "banner_ad" &&
+  !classification.advertiserName &&
+  !classification.creativeUrl &&
+  !classification.landingPage
+) {
+  continue;
+}
+
+    const uniqueKey =
+      classification.advertiserName
+        ? [
+            classification.type,
+            classification.advertiserName.toLowerCase(),
+          ].join("|")
+        : [
+            classification.type,
+            classification.landingPage,
+          ].join("|");
 
     if (seen.has(uniqueKey)) {
       continue;
@@ -302,7 +665,8 @@ function classifyCandidates(candidates = []) {
   }
 
   return results.sort(
-    (a, b) => b.confidence - a.confidence
+    (a, b) =>
+      b.confidence - a.confidence
   );
 }
 
