@@ -6,17 +6,31 @@ const {
   decryptSmtpPassword,
 } = require("./smtpCrypto");
 
-async function getAvailableSmtpAccount() {
+/* ========================================
+   AVAILABLE SMTP ACCOUNT
+======================================== */
+
+async function getAvailableSmtpAccount(
+  preferredAccountId = null
+) {
+  let query = supabase
+    .from("smtp_accounts")
+    .select("*")
+    .eq("is_active", true)
+    .eq("health_status", "healthy");
+
+  if (preferredAccountId) {
+    query = query.eq(
+      "id",
+      preferredAccountId
+    );
+  }
+
   const { data: accounts, error } =
-    await supabase
-      .from("smtp_accounts")
-      .select("*")
-      .eq("is_active", true)
-      .eq("health_status", "healthy")
-      .order("last_used_at", {
-        ascending: true,
-        nullsFirst: true,
-      });
+    await query.order("last_used_at", {
+      ascending: true,
+      nullsFirst: true,
+    });
 
   if (error) {
     throw error;
@@ -26,12 +40,16 @@ async function getAvailableSmtpAccount() {
     accounts ?? []
   ).find(
     (account) =>
-      account.sent_today <
-      account.daily_limit
+      Number(account.sent_today ?? 0) <
+      Number(account.daily_limit ?? 0)
   );
 
   return availableAccount ?? null;
 }
+
+/* ========================================
+   TRANSPORTER
+======================================== */
 
 function createTransporter(account) {
   const password = decryptSmtpPassword(
@@ -40,7 +58,8 @@ function createTransporter(account) {
 
   return nodemailer.createTransport({
     host: account.smtp_host,
-    port: account.smtp_port,
+
+    port: Number(account.smtp_port),
 
     secure:
       Number(account.smtp_port) === 465,
@@ -56,6 +75,10 @@ function createTransporter(account) {
   });
 }
 
+/* ========================================
+   ACCOUNT USAGE
+======================================== */
+
 async function markAccountUsed(account) {
   const nextSentToday =
     Number(account.sent_today ?? 0) + 1;
@@ -64,7 +87,9 @@ async function markAccountUsed(account) {
     .from("smtp_accounts")
     .update({
       sent_today: nextSentToday,
-      last_used_at: new Date().toISOString(),
+
+      last_used_at:
+        new Date().toISOString(),
     })
     .eq("id", account.id);
 
@@ -73,12 +98,21 @@ async function markAccountUsed(account) {
   }
 }
 
+/* ========================================
+   SEND EMAIL
+======================================== */
+
 async function sendEmail({
   to,
   subject,
   text,
   html,
   replyTo,
+
+  inReplyTo = null,
+  references = null,
+
+  preferredSmtpAccountId = null,
 }) {
   if (!to) {
     throw new Error(
@@ -93,12 +127,15 @@ async function sendEmail({
   }
 
   const account =
-    await getAvailableSmtpAccount();
+    await getAvailableSmtpAccount(
+      preferredSmtpAccountId
+    );
 
   if (!account) {
     return {
       success: false,
       queued: true,
+
       error:
         "No healthy SMTP account currently available",
     };
@@ -112,25 +149,42 @@ async function sendEmail({
       `Sending email to ${to} using ${account.email}`
     );
 
+    const mailOptions = {
+      from: {
+        name:
+          account.sender_name ||
+          account.name,
+
+        address: account.email,
+      },
+
+      to,
+
+      replyTo:
+        replyTo || account.email,
+
+      subject,
+
+      text,
+
+      html,
+    };
+
+    if (inReplyTo) {
+      mailOptions.inReplyTo = inReplyTo;
+    }
+
+    if (references) {
+      mailOptions.references =
+        Array.isArray(references)
+          ? references
+          : [references];
+    }
+
     const result =
-      await transporter.sendMail({
-        from: {
-          name:
-            account.sender_name ||
-            account.name,
-          address: account.email,
-        },
-
-        to,
-        replyTo:
-          replyTo || account.email,
-
-        subject,
-
-        text,
-
-        html,
-      });
+      await transporter.sendMail(
+        mailOptions
+      );
 
     await markAccountUsed(account);
 
@@ -141,8 +195,11 @@ async function sendEmail({
     return {
       success: true,
       queued: false,
+
       messageId: result.messageId,
+
       smtpAccountId: account.id,
+
       senderEmail: account.email,
     };
   } catch (error) {
@@ -154,7 +211,9 @@ async function sendEmail({
     return {
       success: false,
       queued: false,
+
       smtpAccountId: account.id,
+
       error: error.message,
     };
   } finally {
@@ -164,5 +223,6 @@ async function sendEmail({
 
 module.exports = {
   getAvailableSmtpAccount,
+  createTransporter,
   sendEmail,
 };

@@ -1,4 +1,5 @@
 const { ImapFlow } = require("imapflow");
+
 const {
   simpleParser,
 } = require("mailparser");
@@ -8,6 +9,10 @@ const { supabase } = require("./supabase");
 const {
   decryptSmtpPassword,
 } = require("./smtpCrypto");
+
+/* ========================================
+   GET IMAP ACCOUNTS
+======================================== */
 
 async function getImapAccounts() {
   const { data, error } = await supabase
@@ -29,21 +34,25 @@ async function getImapAccounts() {
   return data || [];
 }
 
+/* ========================================
+   CREATE IMAP CLIENT
+======================================== */
+
 function createImapClient(account) {
   const password = decryptSmtpPassword(
     account.imap_password_encrypted
   );
 
+  const port = Number(
+    account.imap_port || 993
+  );
+
   return new ImapFlow({
     host: account.imap_host,
 
-    port: Number(
-      account.imap_port || 993
-    ),
+    port,
 
-    secure:
-      Number(account.imap_port || 993) ===
-      993,
+    secure: port === 993,
 
     auth: {
       user: account.imap_username,
@@ -54,23 +63,72 @@ function createImapClient(account) {
   });
 }
 
-async function replyExists(messageId) {
-  if (!messageId) {
+/* ========================================
+   NORMALIZE MESSAGE ID
+======================================== */
+
+function normalizeMessageId(value) {
+  if (!value) {
+    return null;
+  }
+
+  return String(value).trim();
+}
+
+/* ========================================
+   MESSAGE EXISTS
+======================================== */
+
+async function messageExists(messageId) {
+  const normalizedMessageId =
+    normalizeMessageId(messageId);
+
+  if (!normalizedMessageId) {
     return false;
   }
 
-  const { data, error } = await supabase
+  const {
+    data: reply,
+    error: replyError,
+  } = await supabase
     .from("replies")
     .select("id")
-    .eq("message_id", messageId)
+    .eq(
+      "message_id",
+      normalizedMessageId
+    )
     .maybeSingle();
 
-  if (error) {
-    throw error;
+  if (replyError) {
+    throw replyError;
   }
 
-  return Boolean(data);
+  if (reply) {
+    return true;
+  }
+
+  const {
+    data: threadMessage,
+    error: threadError,
+  } = await supabase
+    .from("reply_messages")
+    .select("id")
+    .eq(
+      "message_id",
+      normalizedMessageId
+    )
+    .maybeSingle();
+
+  if (threadError) {
+    throw threadError;
+  }
+
+  return Boolean(threadMessage);
 }
+
+/* ========================================
+   FIND CAMPAIGN CONTEXT
+======================================== */
 
 async function findCampaignContext(
   fromEmail
@@ -79,8 +137,9 @@ async function findCampaignContext(
     return null;
   }
 
-  const normalizedEmail =
-    fromEmail.trim().toLowerCase();
+  const normalizedEmail = fromEmail
+    .trim()
+    .toLowerCase();
 
   const { data: contacts, error } =
     await supabase
@@ -90,7 +149,10 @@ async function findCampaignContext(
         advertiser_id,
         email
       `)
-      .ilike("email", normalizedEmail)
+      .ilike(
+        "email",
+        normalizedEmail
+      )
       .limit(1);
 
   if (error) {
@@ -104,29 +166,28 @@ async function findCampaignContext(
   }
 
   const {
-    data: campaignLeads,
-    error: campaignLeadError,
-  } = await supabase
-    .from("campaign_leads")
-    .select(`
-      id,
-      campaign_id,
-      advertiser_id,
-      status
-    `)
-    .eq(
-      "advertiser_id",
-      contact.advertiser_id
-    )
-    .in("status", [
-      "queued",
-      "sent",
-      "replied",
-    ])
-    .order("created_at", {
-      ascending: false,
-    })
-    .limit(1);
+  data: campaignLeads,
+  error: campaignLeadError,
+} = await supabase
+  .from("campaign_leads")
+  .select(`
+    id,
+    campaign_id,
+    advertiser_id,
+    status,
+    next_follow_up_at,
+    follow_up_count
+  `)
+  .eq(
+    "advertiser_id",
+    contact.advertiser_id
+  )
+  .in("status", [
+    "queued",
+    "sent",
+    "replied",
+  ])
+  .limit(1);
 
   if (campaignLeadError) {
     throw campaignLeadError;
@@ -145,7 +206,133 @@ async function findCampaignContext(
   };
 }
 
-async function saveReply({
+/* ========================================
+   FIND EXISTING REPLY THREAD
+======================================== */
+
+async function findReplyThread({
+  context,
+  parsed,
+}) {
+  const inReplyTo =
+    Array.isArray(parsed.inReplyTo)
+      ? parsed.inReplyTo[0]
+      : parsed.inReplyTo || null;
+
+  const references = Array.isArray(
+    parsed.references
+  )
+    ? parsed.references
+    : parsed.references
+      ? [parsed.references]
+      : [];
+
+  const threadMessageIds = [
+    inReplyTo,
+    ...references,
+  ]
+    .map(normalizeMessageId)
+    .filter(Boolean);
+
+  /*
+   * First try exact email threading.
+   */
+
+  for (
+    const threadMessageId of threadMessageIds
+  ) {
+    const {
+      data: directReply,
+      error: directReplyError,
+    } = await supabase
+      .from("replies")
+      .select("*")
+      .eq(
+        "message_id",
+        threadMessageId
+      )
+      .maybeSingle();
+
+    if (directReplyError) {
+      throw directReplyError;
+    }
+
+    if (directReply) {
+      return directReply;
+    }
+
+    const {
+      data: threadMessage,
+      error: threadMessageError,
+    } = await supabase
+      .from("reply_messages")
+      .select("reply_id")
+      .eq(
+        "message_id",
+        threadMessageId
+      )
+      .maybeSingle();
+
+    if (threadMessageError) {
+      throw threadMessageError;
+    }
+
+    if (threadMessage?.reply_id) {
+      const {
+        data: parentReply,
+        error: parentReplyError,
+      } = await supabase
+        .from("replies")
+        .select("*")
+        .eq(
+          "id",
+          threadMessage.reply_id
+        )
+        .single();
+
+      if (parentReplyError) {
+        throw parentReplyError;
+      }
+
+      return parentReply;
+    }
+  }
+
+  /*
+   * Fallback to latest advertiser reply.
+   */
+
+  const {
+    data: existingReplies,
+    error: existingReplyError,
+  } = await supabase
+    .from("replies")
+    .select("*")
+    .eq(
+      "advertiser_id",
+      context.campaignLead.advertiser_id
+    )
+    .eq(
+      "campaign_id",
+      context.campaignLead.campaign_id
+    )
+    .order("received_at", {
+      ascending: false,
+    })
+    .limit(1);
+
+  if (existingReplyError) {
+    throw existingReplyError;
+  }
+
+  return existingReplies?.[0] || null;
+}
+
+/* ========================================
+   SAVE INITIAL REPLY
+======================================== */
+
+async function saveInitialReply({
   account,
   parsed,
   context,
@@ -161,12 +348,18 @@ async function saveReply({
       .toLowerCase() || null;
 
   const messageId =
-    parsed.messageId || null;
+    normalizeMessageId(
+      parsed.messageId
+    );
 
   const inReplyTo =
     Array.isArray(parsed.inReplyTo)
       ? parsed.inReplyTo[0]
       : parsed.inReplyTo || null;
+
+  const receivedAt = parsed.date
+    ? parsed.date.toISOString()
+    : new Date().toISOString();
 
   const { data, error } = await supabase
     .from("replies")
@@ -187,7 +380,8 @@ async function saveReply({
 
       message_id: messageId,
 
-      in_reply_to: inReplyTo,
+      in_reply_to:
+        normalizeMessageId(inReplyTo),
 
       from_email: fromEmail,
 
@@ -201,10 +395,7 @@ async function saveReply({
         parsed.html ||
         null,
 
-      received_at:
-        parsed.date
-          ? parsed.date.toISOString()
-          : new Date().toISOString(),
+      received_at: receivedAt,
 
       is_read: false,
     })
@@ -221,6 +412,10 @@ async function saveReply({
     .from("campaign_leads")
     .update({
       status: "replied",
+
+      next_follow_up_at: null,
+
+      failure_reason: null,
     })
     .eq(
       "id",
@@ -231,19 +426,108 @@ async function saveReply({
     throw campaignLeadError;
   }
 
+  console.log(
+    `New reply thread created: ${data.id}`
+  );
+
   return data;
 }
+
+/* ========================================
+   SAVE INBOUND THREAD MESSAGE
+======================================== */
+
+async function saveInboundThreadMessage({
+  reply,
+  parsed,
+}) {
+  const fromEmail =
+    parsed.from?.value?.[0]?.address
+      ?.trim()
+      .toLowerCase() || null;
+
+  const toEmail =
+    parsed.to?.value?.[0]?.address
+      ?.trim()
+      .toLowerCase() || null;
+
+  const messageId =
+    normalizeMessageId(
+      parsed.messageId
+    );
+
+  const inReplyTo =
+    Array.isArray(parsed.inReplyTo)
+      ? parsed.inReplyTo[0]
+      : parsed.inReplyTo || null;
+
+  const receivedAt = parsed.date
+    ? parsed.date.toISOString()
+    : new Date().toISOString();
+
+  const { data, error } = await supabase
+    .from("reply_messages")
+    .insert({
+      reply_id: reply.id,
+
+      direction: "inbound",
+
+      from_email: fromEmail,
+
+      to_email: toEmail,
+
+      subject:
+        parsed.subject || null,
+
+      body:
+        parsed.text ||
+        parsed.html ||
+        null,
+
+      message_id: messageId,
+
+      in_reply_to:
+        normalizeMessageId(inReplyTo),
+
+      sent_at: receivedAt,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  await supabase
+    .from("replies")
+    .update({
+      is_read: false,
+    })
+    .eq("id", reply.id);
+
+  console.log(
+    `Inbound thread message saved: ${data.id}`
+  );
+
+  return data;
+}
+
+/* ========================================
+   PROCESS MESSAGE
+======================================== */
 
 async function processMessage({
   account,
   parsed,
 }) {
   const messageId =
-    parsed.messageId || null;
+    normalizeMessageId(
+      parsed.messageId
+    );
 
   if (
     messageId &&
-    (await replyExists(messageId))
+    (await messageExists(messageId))
   ) {
     return {
       status: "duplicate",
@@ -262,33 +546,78 @@ async function processMessage({
   }
 
   const context =
-    await findCampaignContext(fromEmail);
+    await findCampaignContext(
+      fromEmail
+    );
 
   if (!context) {
     return {
       status: "ignored",
+
       reason:
         "No matching campaign lead",
+
       fromEmail,
     };
   }
 
-  const reply = await saveReply({
-    account,
-    parsed,
-    context,
-  });
+  const existingReply =
+    await findReplyThread({
+      context,
+      parsed,
+    });
+
+  if (existingReply) {
+    const threadMessage =
+      await saveInboundThreadMessage({
+        reply: existingReply,
+        parsed,
+      });
+
+    console.log(
+      `Thread reply detected from ${fromEmail}`
+    );
+
+    return {
+      status: "thread_message_saved",
+
+      replyId: existingReply.id,
+
+      messageId: threadMessage.id,
+
+      campaignLeadId:
+        context.campaignLead.id,
+
+      fromEmail,
+    };
+  }
+
+  const reply =
+    await saveInitialReply({
+      account,
+      parsed,
+      context,
+    });
 
   console.log(
-    `Reply detected from ${fromEmail}`
+    `Initial reply detected from ${fromEmail}`
   );
 
   return {
     status: "saved",
+
     replyId: reply.id,
+
+    campaignLeadId:
+      context.campaignLead.id,
+
     fromEmail,
   };
 }
+
+/* ========================================
+   CHECK ACCOUNT REPLIES
+======================================== */
 
 async function checkAccountReplies(
   account
@@ -317,18 +646,19 @@ async function checkAccountReplies(
         since.getDate() - 7
       );
 
-      const messages =
-        client.fetch(
-          {
-            since,
-          },
-          {
-            uid: true,
-            source: true,
-          }
-        );
+      const messages = client.fetch(
+        {
+          since,
+        },
+        {
+          uid: true,
+          source: true,
+        }
+      );
 
-      for await (const message of messages) {
+      for await (
+        const message of messages
+      ) {
         try {
           const parsed =
             await simpleParser(
@@ -347,17 +677,32 @@ async function checkAccountReplies(
             "Reply processing failed:",
             error
           );
+
+          results.push({
+            status: "failed",
+
+            error:
+              error instanceof Error
+                ? error.message
+                : "Reply processing failed",
+          });
         }
       }
     } finally {
       lock.release();
     }
   } finally {
-    await client.logout().catch(() => {});
+    await client
+      .logout()
+      .catch(() => {});
   }
 
   return results;
 }
+
+/* ========================================
+   RUN REPLY DETECTOR
+======================================== */
 
 async function runReplyDetector() {
   console.log(
@@ -390,7 +735,9 @@ async function runReplyDetector() {
 
       results.push({
         smtpAccountId: account.id,
+
         email: account.email,
+
         results: accountResults,
       });
     } catch (error) {
@@ -401,8 +748,13 @@ async function runReplyDetector() {
 
       results.push({
         smtpAccountId: account.id,
+
         email: account.email,
-        error: error.message,
+
+        error:
+          error instanceof Error
+            ? error.message
+            : "Inbox check failed",
       });
     }
   }
@@ -410,12 +762,28 @@ async function runReplyDetector() {
   return results;
 }
 
+/* ========================================
+   EXPORTS
+======================================== */
+
 module.exports = {
   getImapAccounts,
+
   createImapClient,
-  replyExists,
+
+  messageExists,
+
   findCampaignContext,
+
+  findReplyThread,
+
+  saveInitialReply,
+
+  saveInboundThreadMessage,
+
   processMessage,
+
   checkAccountReplies,
+
   runReplyDetector,
 };

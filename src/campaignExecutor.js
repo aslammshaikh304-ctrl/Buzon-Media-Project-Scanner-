@@ -4,6 +4,8 @@ const {
   sendEmail,
 } = require("./emailSender");
 
+const DEFAULT_FOLLOW_UP_DELAY_DAYS = 3;
+
 async function getActiveCampaigns() {
   const { data, error } = await supabase
     .from("campaigns")
@@ -100,16 +102,47 @@ async function markLeadQueued(
   );
 }
 
+function getFirstFollowUpAt(campaign) {
+  const delayDays = Number(
+    campaign.follow_up_delay_days ||
+      DEFAULT_FOLLOW_UP_DELAY_DAYS
+  );
+
+  const safeDelayDays =
+    Number.isFinite(delayDays) &&
+    delayDays > 0
+      ? delayDays
+      : DEFAULT_FOLLOW_UP_DELAY_DAYS;
+
+  return new Date(
+    Date.now() +
+      safeDelayDays *
+        24 *
+        60 *
+        60 *
+        1000
+  ).toISOString();
+}
+
 async function markLeadSent(
-  campaignLeadId
+  campaignLeadId,
+  campaign
 ) {
+  const nextFollowUpAt =
+    getFirstFollowUpAt(campaign);
+
   await updateCampaignLeadStatus(
     campaignLeadId,
     "sent",
     {
       failure_reason: null,
+      follow_up_count: 0,
+      next_follow_up_at:
+        nextFollowUpAt,
     }
   );
+
+  return nextFollowUpAt;
 }
 
 async function markLeadFailed(
@@ -216,7 +249,8 @@ async function processCampaignLead(
 
     return {
       status: "failed",
-      campaignLeadId: campaignLead.id,
+      campaignLeadId:
+        campaignLead.id,
     };
   }
 
@@ -235,7 +269,8 @@ async function processCampaignLead(
 
     return {
       status: "failed",
-      campaignLeadId: campaignLead.id,
+      campaignLeadId:
+        campaignLead.id,
     };
   }
 
@@ -277,12 +312,18 @@ async function processCampaignLead(
   });
 
   if (sendResult.success) {
-    await markLeadSent(
-      campaignLead.id
-    );
+    const nextFollowUpAt =
+      await markLeadSent(
+        campaignLead.id,
+        campaign
+      );
 
     console.log(
       `Lead sent successfully: ${sendResult.messageId}`
+    );
+
+    console.log(
+      `First follow-up scheduled: ${nextFollowUpAt}`
     );
 
     return {
@@ -298,6 +339,7 @@ async function processCampaignLead(
         sendResult.messageId,
       smtpAccountId:
         sendResult.smtpAccountId,
+      nextFollowUpAt,
     };
   }
 
@@ -467,6 +509,7 @@ module.exports = {
   getActiveCampaigns,
   getPendingCampaignLeads,
   getPrimaryContact,
+  getFirstFollowUpAt,
   createOutreachEmail,
   processCampaignLead,
   executeCampaign,

@@ -2,6 +2,10 @@ const {
   supabase,
 } = require("./supabase");
 
+/* ========================================
+   CLASSIFICATION PATTERNS
+======================================== */
+
 const INTERESTED_PATTERNS = [
   "interested",
   "sounds interesting",
@@ -17,7 +21,6 @@ const INTERESTED_PATTERNS = [
   "can we talk",
   "happy to discuss",
   "open to discussing",
-  "send me details",
 ];
 
 const NOT_INTERESTED_PATTERNS = [
@@ -37,7 +40,9 @@ const NEEDS_INFO_PATTERNS = [
   "more information",
   "more info",
   "send details",
+  "send me details",
   "send more details",
+  "send me more details",
   "how does it work",
   "what is the price",
   "what's the price",
@@ -61,6 +66,10 @@ const OUT_OF_OFFICE_PATTERNS = [
   "limited access to email",
 ];
 
+/* ========================================
+   TEXT HELPERS
+======================================== */
+
 function normalizeText(value) {
   return String(value || "")
     .toLowerCase()
@@ -76,6 +85,10 @@ function containsPattern(
     text.includes(pattern)
   );
 }
+
+/* ========================================
+   CLASSIFY REPLY CONTENT
+======================================== */
 
 function classifyReplyContent({
   subject,
@@ -100,8 +113,11 @@ function classifyReplyContent({
     )
   ) {
     return {
-      classification: "out_of_office",
+      classification:
+        "out_of_office",
+
       confidence: 0.95,
+
       reason:
         "Out-of-office language detected",
     };
@@ -114,8 +130,11 @@ function classifyReplyContent({
     )
   ) {
     return {
-      classification: "not_interested",
+      classification:
+        "not_interested",
+
       confidence: 0.95,
+
       reason:
         "Negative intent language detected",
     };
@@ -128,8 +147,11 @@ function classifyReplyContent({
     )
   ) {
     return {
-      classification: "needs_info",
+      classification:
+        "needs_info",
+
       confidence: 0.85,
+
       reason:
         "Information request language detected",
     };
@@ -142,8 +164,11 @@ function classifyReplyContent({
     )
   ) {
     return {
-      classification: "interested",
+      classification:
+        "interested",
+
       confidence: 0.9,
+
       reason:
         "Positive intent language detected",
     };
@@ -151,11 +176,17 @@ function classifyReplyContent({
 
   return {
     classification: "unknown",
+
     confidence: 0.25,
+
     reason:
       "No strong intent pattern detected",
   };
 }
+
+/* ========================================
+   UPDATE REPLY CLASSIFICATION
+======================================== */
 
 async function updateReplyClassification(
   replyId,
@@ -166,10 +197,13 @@ async function updateReplyClassification(
     .update({
       classification:
         result.classification,
+
       classification_confidence:
         result.confidence,
+
       classification_reason:
         result.reason,
+
       classified_at:
         new Date().toISOString(),
     })
@@ -180,6 +214,10 @@ async function updateReplyClassification(
   }
 }
 
+/* ========================================
+   UPDATE ADVERTISER
+======================================== */
+
 async function updateAdvertiserFromReply(
   reply,
   classification
@@ -187,6 +225,14 @@ async function updateAdvertiserFromReply(
   if (!reply.advertiser_id) {
     return;
   }
+
+  /*
+   * Reply classification and advertiser
+   * status are different concepts.
+   *
+   * needs_info and out_of_office are NOT
+   * valid advertiser statuses.
+   */
 
   let status = null;
 
@@ -200,7 +246,7 @@ async function updateAdvertiserFromReply(
       break;
 
     case "needs_info":
-      status = "needs_info";
+      status = "contacted";
       break;
 
     case "out_of_office":
@@ -216,12 +262,24 @@ async function updateAdvertiserFromReply(
     .update({
       status,
     })
-    .eq("id", reply.advertiser_id);
+    .eq(
+      "id",
+      reply.advertiser_id
+    );
 
   if (error) {
     throw error;
   }
+
+  console.log(
+    `Advertiser ${reply.advertiser_id} status updated to ${status}`
+  );
 }
+
+/* ========================================
+   CLASSIFY SINGLE REPLY
+======================================== */
+
 async function classifyReply(reply) {
   if (!reply?.id) {
     throw new Error(
@@ -232,17 +290,25 @@ async function classifyReply(reply) {
   const result =
     classifyReplyContent({
       subject: reply.subject,
+
       body: reply.body,
     });
 
-  await updateReplyClassification(
-    reply.id,
-    result
-  );
+  /*
+   * Update advertiser first.
+   *
+   * This prevents a partially classified
+   * reply if advertiser update fails.
+   */
 
   await updateAdvertiserFromReply(
     reply,
     result.classification
+  );
+
+  await updateReplyClassification(
+    reply.id,
+    result
   );
 
   console.log(
@@ -251,9 +317,14 @@ async function classifyReply(reply) {
 
   return {
     replyId: reply.id,
+
     ...result,
   };
 }
+
+/* ========================================
+   GET UNCLASSIFIED REPLIES
+======================================== */
 
 async function getUnclassifiedReplies() {
   const { data, error } = await supabase
@@ -271,6 +342,10 @@ async function getUnclassifiedReplies() {
 
   return data || [];
 }
+
+/* ========================================
+   RUN REPLY CLASSIFIER
+======================================== */
 
 async function runReplyClassifier() {
   console.log(
@@ -300,7 +375,9 @@ async function runReplyClassifier() {
 
       results.push({
         replyId: reply.id,
+
         classification: "failed",
+
         error:
           error instanceof Error
             ? error.message
@@ -317,9 +394,16 @@ async function runReplyClassifier() {
   return results;
 }
 
+/* ========================================
+   EXPORTS
+======================================== */
+
 module.exports = {
   classifyReplyContent,
+
   classifyReply,
+
   getUnclassifiedReplies,
+
   runReplyClassifier,
 };

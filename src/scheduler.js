@@ -20,11 +20,16 @@ const {
   runReplyClassifier,
 } = require("./replyClassifier");
 
+const {
+  runFollowUpExecutor,
+} = require("./followUpExecutor");
+
 const CONCURRENCY_LIMIT = 3;
 
 let scanSchedulerRunning = false;
 let campaignExecutorRunning = false;
 let replyPipelineRunning = false;
+let followUpExecutorRunning = false;
 
 async function getDueWebsites() {
   const now = new Date().toISOString();
@@ -283,6 +288,42 @@ async function runScheduledReplies() {
   }
 }
 
+async function runScheduledFollowUps() {
+  if (followUpExecutorRunning) {
+    console.log(
+      "Follow-up executor already running. Skipping cycle."
+    );
+
+    return [];
+  }
+
+  followUpExecutorRunning = true;
+
+  try {
+    console.log(
+      "\n========== FOLLOW-UP SCHEDULER =========="
+    );
+
+    const results =
+      await runFollowUpExecutor();
+
+    console.log(
+      "Follow-up scheduler cycle completed."
+    );
+
+    return results;
+  } catch (error) {
+    console.error(
+      "Follow-up scheduler error:",
+      error.message
+    );
+
+    return [];
+  } finally {
+    followUpExecutorRunning = false;
+  }
+}
+
 async function runAutomationCycle() {
   console.log(
     "\n========================================"
@@ -303,11 +344,13 @@ async function runAutomationCycle() {
       runScheduledScans(),
       runScheduledCampaigns(),
       runScheduledReplies(),
+      runScheduledFollowUps(),
     ]);
 
   const scanResult = results[0];
   const campaignResult = results[1];
   const replyResult = results[2];
+  const followUpResult = results[3];
 
   if (scanResult.status === "rejected") {
     console.error(
@@ -332,6 +375,15 @@ async function runAutomationCycle() {
     );
   }
 
+  if (
+    followUpResult.status === "rejected"
+  ) {
+    console.error(
+      "Follow-up automation cycle rejected:",
+      followUpResult.reason
+    );
+  }
+
   const durationSeconds = (
     (Date.now() - startedAt) /
     1000
@@ -353,6 +405,7 @@ async function runAutomationCycle() {
     scanResult,
     campaignResult,
     replyResult,
+    followUpResult,
   };
 }
 
@@ -363,5 +416,6 @@ module.exports = {
   runScheduledScans,
   runScheduledCampaigns,
   runScheduledReplies,
+  runScheduledFollowUps,
   runAutomationCycle,
 };
