@@ -118,10 +118,6 @@ async function getConversationMessages(
 ) {
   const messages = [];
 
-  /*
-   * Original inbound reply.
-   */
-
   messages.push({
     id: reply.id,
 
@@ -143,28 +139,23 @@ async function getConversationMessages(
     source: "reply",
   });
 
-  /*
-   * Get all stored inbound and outbound
-   * thread messages.
-   */
-
   const {
-  data: replyMessages,
-  error,
-} = await supabase
-  .from("reply_messages")
-  .select(`
-    id,
-    direction,
-    from_email,
-    to_email,
-    subject,
-    body,
-    message_id,
-    in_reply_to,
-    sent_at
-  `)
-  .eq("reply_id", reply.id);
+    data: replyMessages,
+    error,
+  } = await supabase
+    .from("reply_messages")
+    .select(`
+      id,
+      direction,
+      from_email,
+      to_email,
+      subject,
+      body,
+      message_id,
+      in_reply_to,
+      sent_at
+    `)
+    .eq("reply_id", reply.id);
 
   if (error) {
     console.error(
@@ -198,15 +189,11 @@ async function getConversationMessages(
       ),
 
       timestamp:
-  message.sent_at,
+        message.sent_at,
 
       source: "reply_message",
     });
   }
-
-  /*
-   * Remove accidental duplicates.
-   */
 
   const uniqueMessages = [];
 
@@ -233,11 +220,6 @@ async function getConversationMessages(
     uniqueMessages.push(message);
   }
 
-  /*
-   * Sort entire conversation
-   * chronologically.
-   */
-
   uniqueMessages.sort(
     (a, b) =>
       new Date(
@@ -252,7 +234,7 @@ async function getConversationMessages(
 }
 
 /* ========================================
-   GET LATEST MESSAGE
+   MESSAGE HELPERS
 ======================================== */
 
 function getLatestMessage(messages) {
@@ -265,10 +247,6 @@ function getLatestMessage(messages) {
   ];
 }
 
-/* ========================================
-   GET LATEST INBOUND MESSAGE
-======================================== */
-
 function getLatestInboundMessage(
   messages
 ) {
@@ -279,6 +257,20 @@ function getLatestInboundMessage(
         (message) =>
           message.direction ===
           "inbound"
+      ) || null
+  );
+}
+
+function getLatestOutboundMessage(
+  messages
+) {
+  return (
+    [...messages]
+      .reverse()
+      .find(
+        (message) =>
+          message.direction ===
+          "outbound"
       ) || null
   );
 }
@@ -315,7 +307,6 @@ function buildConversationText(
       "\n\n--------------------\n\n"
     );
 }
-
 /* ========================================
    INTENT HELPERS
 ======================================== */
@@ -362,29 +353,15 @@ function detectLatestIntent(message) {
 
   if (
     includesAny(text, [
-      "available tomorrow",
-      "free tomorrow",
-      "tomorrow works",
-      "available today",
-      "free today",
-      "available monday",
-      "available tuesday",
-      "available wednesday",
-      "available thursday",
-      "available friday",
-      "available saturday",
-      "available sunday",
-      "schedule a call",
-      "book a call",
-      "let's talk",
-      "lets talk",
-      "let's discuss",
-      "lets discuss",
-      "can we talk",
-      "happy to discuss",
+      "out of office",
+      "away from the office",
+      "currently away",
+      "on leave",
+      "annual leave",
+      "vacation",
     ])
   ) {
-    return "meeting_ready";
+    return "out_of_office";
   }
 
   if (
@@ -394,9 +371,49 @@ function detectLatestIntent(message) {
       "what time works",
       "when are you available",
       "when can you",
+      "what day works",
+      "which day works",
     ])
   ) {
     return "asking_time";
+  }
+
+  if (
+    includesAny(text, [
+      "available tomorrow",
+      "free tomorrow",
+      "tomorrow works",
+      "available today",
+      "free today",
+      "today works",
+      "available monday",
+      "available tuesday",
+      "available wednesday",
+      "available thursday",
+      "available friday",
+      "available saturday",
+      "available sunday",
+    ])
+  ) {
+    return "specific_availability";
+  }
+
+  if (
+    includesAny(text, [
+      "schedule a call",
+      "book a call",
+      "let's talk",
+      "lets talk",
+      "let's discuss",
+      "lets discuss",
+      "can we talk",
+      "happy to discuss",
+      "quick call",
+      "arrange a call",
+      "set up a call",
+    ])
+  ) {
+    return "meeting_interest";
   }
 
   if (
@@ -425,12 +442,48 @@ function detectLatestIntent(message) {
       "sounds good",
       "open to discussing",
       "open to discuss",
+      "happy to explore",
     ])
   ) {
     return "interested";
   }
 
   return "unknown";
+}
+
+/* ========================================
+   DETERMINE REPLY STATE
+======================================== */
+
+function determineReplyState(messages) {
+  const latestMessage =
+    getLatestMessage(messages);
+
+  if (!latestMessage) {
+    return {
+      state: "no_messages",
+      shouldGenerateDraft: false,
+    };
+  }
+
+  if (
+    latestMessage.direction ===
+    "outbound"
+  ) {
+    return {
+      state:
+        "waiting_for_advertiser",
+
+      shouldGenerateDraft: false,
+    };
+  }
+
+  return {
+    state:
+      "advertiser_replied",
+
+    shouldGenerateDraft: true,
+  };
 }
 
 /* ========================================
@@ -448,17 +501,8 @@ function buildReplyDraft({
     advertiser?.company_name ||
     "your company";
 
-  const latestMessage =
-    getLatestMessage(messages);
-
   const latestInbound =
     getLatestInboundMessage(messages);
-
-  /*
-   * Draft generation must always
-   * react to the latest inbound
-   * advertiser message.
-   */
 
   const intent =
     detectLatestIntent(
@@ -471,13 +515,24 @@ function buildReplyDraft({
     );
 
   switch (intent) {
-    case "meeting_ready":
+    case "specific_availability":
       return [
         "Hi,",
         "",
-        "Perfect, tomorrow works for me.",
+        "Perfect, that works for me.",
         "",
         "What time would be convenient for you?",
+        "",
+        "Best regards,",
+      ].join("\n");
+
+    case "meeting_interest":
+      return [
+        "Hi,",
+        "",
+        "Thanks for getting back to me. I'd be happy to discuss the opportunity.",
+        "",
+        "What day and time would be convenient for a quick call?",
         "",
         "Best regards,",
       ].join("\n");
@@ -518,7 +573,7 @@ function buildReplyDraft({
         "",
         "I'd be happy to discuss the advertising opportunity and explore the next steps.",
         "",
-        "Would you be available for a quick call? Please let me know a convenient time.",
+        "Would you be available for a quick call? Please let me know a convenient day and time.",
         "",
         "Best regards,",
       ].join("\n");
@@ -534,13 +589,18 @@ function buildReplyDraft({
         "Best regards,",
       ].join("\n");
 
-    default:
-      /*
-       * Classification is only used
-       * as a fallback when the latest
-       * message intent is unclear.
-       */
+    case "out_of_office":
+      return [
+        "Hi,",
+        "",
+        "Thanks for the update.",
+        "",
+        "I'll follow up once you're back and available.",
+        "",
+        "Best regards,",
+      ].join("\n");
 
+    default:
       switch (
         reply.classification ||
         "unknown"
@@ -553,7 +613,7 @@ function buildReplyDraft({
             "",
             "I'd be happy to continue the conversation and discuss the opportunity further.",
             "",
-            "Please let me know a convenient time for a quick discussion.",
+            "Please let me know a convenient day and time for a quick discussion.",
             "",
             "Best regards,",
           ].join("\n");
@@ -612,7 +672,6 @@ function buildReplyDraft({
       }
   }
 }
-
 /* ========================================
    GENERATE DRAFT
 ======================================== */
@@ -636,6 +695,11 @@ async function generateReplyDraft(
       messages
     );
 
+  const latestOutbound =
+    getLatestOutboundMessage(
+      messages
+    );
+
   const conversationText =
     buildConversationText(messages);
 
@@ -643,6 +707,9 @@ async function generateReplyDraft(
     detectLatestIntent(
       latestInbound
     );
+
+  const replyState =
+    determineReplyState(messages);
 
   console.log(
     `Generating conversation-aware draft for ${replyId}`
@@ -662,6 +729,63 @@ async function generateReplyDraft(
   console.log(
     `Latest inbound intent: ${latestIntent}`
   );
+
+  console.log(
+    `Reply state: ${replyState.state}`
+  );
+
+  if (
+    !replyState.shouldGenerateDraft
+  ) {
+    console.log(
+      `Draft skipped for ${replyId}: ${replyState.state}`
+    );
+
+    return {
+      success: true,
+
+      replyId: reply.id,
+
+      classification:
+        reply.classification ||
+        "unknown",
+
+      latestIntent,
+
+      messageCount:
+        messages.length,
+
+      latestMessageDirection:
+        latestMessage?.direction ||
+        null,
+
+      latestInboundMessage:
+        latestInbound?.body ||
+        null,
+
+      latestOutboundMessage:
+        latestOutbound?.body ||
+        null,
+
+      recipientEmail:
+        reply.from_email,
+
+      subject:
+        reply.subject || null,
+
+      conversationText,
+
+      replyState:
+        replyState.state,
+
+      shouldGenerateDraft: false,
+
+      draft: null,
+
+      message:
+        "Waiting for advertiser response",
+    };
+  }
 
   const draft =
     buildReplyDraft({
@@ -695,6 +819,10 @@ async function generateReplyDraft(
       latestInbound?.body ||
       null,
 
+    latestOutboundMessage:
+      latestOutbound?.body ||
+      null,
+
     recipientEmail:
       reply.from_email,
 
@@ -702,6 +830,11 @@ async function generateReplyDraft(
       reply.subject || null,
 
     conversationText,
+
+    replyState:
+      replyState.state,
+
+    shouldGenerateDraft: true,
 
     draft,
   };
@@ -724,9 +857,13 @@ module.exports = {
 
   getLatestInboundMessage,
 
+  getLatestOutboundMessage,
+
   buildConversationText,
 
   detectLatestIntent,
+
+  determineReplyState,
 
   buildReplyDraft,
 

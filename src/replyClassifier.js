@@ -226,14 +226,6 @@ async function updateAdvertiserFromReply(
     return;
   }
 
-  /*
-   * Reply classification and advertiser
-   * status are different concepts.
-   *
-   * needs_info and out_of_office are NOT
-   * valid advertiser statuses.
-   */
-
   let status = null;
 
   switch (classification) {
@@ -277,6 +269,148 @@ async function updateAdvertiserFromReply(
 }
 
 /* ========================================
+   SALES OPPORTUNITY
+======================================== */
+
+async function upsertSalesOpportunity(
+  reply,
+  classification
+) {
+  if (
+    classification !== "interested" ||
+    !reply.advertiser_id
+  ) {
+    return null;
+  }
+
+  const now =
+    new Date().toISOString();
+
+  const campaignId =
+    reply.campaign_id &&
+    reply.campaign_id !== "null"
+      ? reply.campaign_id
+      : null;
+
+  let existingQuery = supabase
+    .from("sales_opportunities")
+    .select("id")
+    .eq(
+      "advertiser_id",
+      reply.advertiser_id
+    );
+
+  if (campaignId) {
+    existingQuery =
+      existingQuery.eq(
+        "campaign_id",
+        campaignId
+      );
+  } else {
+    existingQuery =
+      existingQuery.is(
+        "campaign_id",
+        null
+      );
+  }
+
+  const {
+    data: existing,
+    error: findError,
+  } = await existingQuery
+    .limit(1)
+    .maybeSingle();
+
+  if (findError) {
+    throw findError;
+  }
+
+  const opportunityScore =
+    Math.round(
+      Number(
+        reply.classification_confidence ??
+          0.9
+      ) * 100
+    );
+
+  if (existing) {
+    const { data, error } =
+      await supabase
+        .from("sales_opportunities")
+        .update({
+          reply_id: reply.id,
+
+          status: "open",
+
+          stage: "interested",
+
+          opportunity_score:
+            opportunityScore,
+
+          priority: "hot",
+
+          last_reply_at:
+            reply.received_at || now,
+
+          updated_at: now,
+        })
+        .eq("id", existing.id)
+        .select()
+        .single();
+
+    if (error) {
+      throw error;
+    }
+
+    console.log(
+      `Sales opportunity updated: ${data.id}`
+    );
+
+    return data;
+  }
+
+  const { data, error } = await supabase
+    .from("sales_opportunities")
+    .insert({
+      advertiser_id:
+        reply.advertiser_id,
+
+      campaign_id: campaignId,
+
+      reply_id: reply.id,
+
+      status: "open",
+
+      stage: "interested",
+
+      opportunity_score:
+        opportunityScore,
+
+      priority: "hot",
+
+      source:
+        "reply_intelligence",
+
+      last_reply_at:
+        reply.received_at || now,
+
+      updated_at: now,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  console.log(
+    `Sales opportunity created: ${data.id}`
+  );
+
+  return data;
+}
+
+/* ========================================
    CLASSIFY SINGLE REPLY
 ======================================== */
 
@@ -294,13 +428,6 @@ async function classifyReply(reply) {
       body: reply.body,
     });
 
-  /*
-   * Update advertiser first.
-   *
-   * This prevents a partially classified
-   * reply if advertiser update fails.
-   */
-
   await updateAdvertiserFromReply(
     reply,
     result.classification
@@ -309,6 +436,16 @@ async function classifyReply(reply) {
   await updateReplyClassification(
     reply.id,
     result
+  );
+
+  await upsertSalesOpportunity(
+    {
+      ...reply,
+
+      classification_confidence:
+        result.confidence,
+    },
+    result.classification
   );
 
   console.log(
@@ -400,6 +537,12 @@ async function runReplyClassifier() {
 
 module.exports = {
   classifyReplyContent,
+
+  updateReplyClassification,
+
+  updateAdvertiserFromReply,
+
+  upsertSalesOpportunity,
 
   classifyReply,
 
