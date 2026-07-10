@@ -2,21 +2,42 @@ const crypto = require("crypto");
 
 const { supabase } = require("./supabase");
 
-const BLOCKED_ADVERTISER_DOMAINS = new Set([
-  "youtube.com",
-  "youtu.be",
-  "google.com",
-  "googleads.g.doubleclick.net",
-  "doubleclick.net",
-  "googlesyndication.com",
-  "googleadservices.com",
-  "servedbyadbutler.com",
-  "adbutler.com",
-  "facebook.com",
-  "instagram.com",
-  "twitter.com",
-  "x.com",
-]);
+const {
+  discoverContacts,
+} = require("./contactDiscovery");
+
+const {
+  saveDiscoveredContact,
+} = require("./contactStorage");
+
+const {
+  qualifyLead,
+} = require("./leadQualifier");
+
+/* ========================================
+   BLOCKED ADVERTISER DOMAINS
+======================================== */
+
+const BLOCKED_ADVERTISER_DOMAINS =
+  new Set([
+    "youtube.com",
+    "youtu.be",
+    "google.com",
+    "googleads.g.doubleclick.net",
+    "doubleclick.net",
+    "googlesyndication.com",
+    "googleadservices.com",
+    "servedbyadbutler.com",
+    "adbutler.com",
+    "facebook.com",
+    "instagram.com",
+    "twitter.com",
+    "x.com",
+  ]);
+
+/* ========================================
+   URL NORMALIZATION
+======================================== */
 
 function normalizeWebsiteUrl(value) {
   if (!value) {
@@ -37,6 +58,10 @@ function normalizeWebsiteUrl(value) {
     }
   }
 }
+
+/* ========================================
+   DOMAIN NORMALIZATION
+======================================== */
 
 function normalizeDomain(value) {
   if (!value) {
@@ -65,6 +90,10 @@ function normalizeDomain(value) {
     .trim();
 }
 
+/* ========================================
+   COMPANY NAME NORMALIZATION
+======================================== */
+
 function normalizeCompanyName(value) {
   if (!value) {
     return null;
@@ -76,6 +105,10 @@ function normalizeCompanyName(value) {
 
   return cleaned || null;
 }
+
+/* ========================================
+   TEXT NORMALIZATION
+======================================== */
 
 function normalizeText(
   value,
@@ -93,7 +126,13 @@ function normalizeText(
   return cleaned || null;
 }
 
-function isBlockedAdvertiserDomain(domain) {
+/* ========================================
+   BLOCKED DOMAIN CHECK
+======================================== */
+
+function isBlockedAdvertiserDomain(
+  domain
+) {
   const normalizedDomain =
     normalizeDomain(domain);
 
@@ -118,6 +157,10 @@ function isBlockedAdvertiserDomain(domain) {
   return false;
 }
 
+/* ========================================
+   ADVERTISER DOMAIN
+======================================== */
+
 function getAdvertiserDomain(advertiser) {
   if (advertiser.companyDomain) {
     return normalizeDomain(
@@ -134,12 +177,20 @@ function getAdvertiserDomain(advertiser) {
   return null;
 }
 
+/* ========================================
+   ADVERTISER NAME
+======================================== */
+
 function getAdvertiserName(advertiser) {
   return normalizeCompanyName(
     advertiser.companyName ||
       advertiser.advertiserName
   );
 }
+
+/* ========================================
+   LANDING PAGE
+======================================== */
 
 function getLandingPage(advertiser) {
   if (advertiser.companyDomain) {
@@ -156,6 +207,10 @@ function getLandingPage(advertiser) {
     advertiser.landingPage
   );
 }
+
+/* ========================================
+   AD TYPE
+======================================== */
 
 function normalizeAdType(value) {
   const normalized = String(
@@ -178,6 +233,10 @@ function normalizeAdType(value) {
   return "banner_ad";
 }
 
+/* ========================================
+   ADVERTISEMENT FINGERPRINT
+======================================== */
+
 function createAdvertisementFingerprint({
   websiteId,
   advertiserId,
@@ -187,14 +246,6 @@ function createAdvertisementFingerprint({
   destinationUrl,
   contextText,
 }) {
-  /*
-   * A fingerprint identifies the detected ad.
-   *
-   * We intentionally do not include scan_id.
-   * The same ad found during another scan must
-   * resolve to the same advertisement record.
-   */
-
   const fingerprintSource = [
     websiteId || "",
     advertiserId || "",
@@ -216,6 +267,10 @@ function createAdvertisementFingerprint({
     .update(fingerprintSource)
     .digest("hex");
 }
+
+/* ========================================
+   PREPARE UNIQUE ADVERTISERS
+======================================== */
 
 function prepareAdvertisers(
   advertisers = []
@@ -278,6 +333,9 @@ function prepareAdvertisers(
     uniqueAdvertisers.values()
   );
 }
+/* ========================================
+   GET WEBSITE
+======================================== */
 
 async function getWebsiteByUrl(url) {
   const normalizedUrl =
@@ -307,6 +365,10 @@ async function getWebsiteByUrl(url) {
 
   return data;
 }
+
+/* ========================================
+   UPSERT MASTER ADVERTISER
+======================================== */
 
 async function upsertMasterAdvertiser(
   advertiser
@@ -390,6 +452,10 @@ async function upsertMasterAdvertiser(
   return createdAdvertiser;
 }
 
+/* ========================================
+   UPSERT ADVERTISEMENT
+======================================== */
+
 async function upsertAdvertisement({
   advertiser,
   masterAdvertiser,
@@ -427,12 +493,18 @@ async function upsertAdvertisement({
   const fingerprint =
     createAdvertisementFingerprint({
       websiteId: website.id,
+
       advertiserId:
         masterAdvertiser.id,
+
       adType,
+
       creativeUrl,
+
       sourceUrl,
+
       destinationUrl,
+
       contextText,
     });
 
@@ -528,17 +600,18 @@ async function upsertAdvertisement({
 
       image_url: creativeUrl,
 
-source_url:
-  sourceUrl ||
-  finalUrl ||
-  destinationUrl,
+      source_url:
+        sourceUrl ||
+        finalUrl ||
+        destinationUrl,
 
-destination_url:
-  destinationUrl,
+      destination_url:
+        destinationUrl,
 
-final_url: finalUrl,
+      final_url: finalUrl,
 
-context_text: contextText,
+      context_text: contextText,
+
       fingerprint,
 
       detected_at: now,
@@ -564,6 +637,132 @@ context_text: contextText,
   };
 }
 
+/* ========================================
+   GET ACTIVE CAMPAIGN
+======================================== */
+
+async function getActiveCampaign() {
+  const { data, error } = await supabase
+    .from("campaigns")
+    .select("*")
+    .eq("status", "active")
+    .order("created_at", {
+      ascending: true,
+    })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(
+      `Failed to find active campaign: ${error.message}`
+    );
+  }
+
+  return data;
+}
+
+/* ========================================
+   AUTO ENROLL ADVERTISER
+======================================== */
+
+async function autoEnrollAdvertiser({
+  advertiser,
+  discoveredContact,
+}) {
+  if (!advertiser?.id) {
+    return {
+      enrolled: false,
+      reason: "advertiser_missing",
+    };
+  }
+
+  if (!discoveredContact?.email) {
+    return {
+      enrolled: false,
+      reason: "email_missing",
+    };
+  }
+
+  const campaign =
+    await getActiveCampaign();
+
+  if (!campaign) {
+    console.log(
+      `No active campaign. Auto enrollment skipped: ${advertiser.company_name}`
+    );
+
+    return {
+      enrolled: false,
+      reason: "active_campaign_missing",
+    };
+  }
+
+  const {
+    data: existingCampaignLead,
+    error: lookupError,
+  } = await supabase
+    .from("campaign_leads")
+    .select("id, status")
+    .eq("campaign_id", campaign.id)
+    .eq("advertiser_id", advertiser.id)
+    .maybeSingle();
+
+  if (lookupError) {
+    throw new Error(
+      `Campaign lead lookup failed: ${lookupError.message}`
+    );
+  }
+
+  if (existingCampaignLead) {
+    console.log(
+      `Campaign lead already exists: ${advertiser.company_name}`
+    );
+
+    return {
+      enrolled: false,
+      reason: "already_enrolled",
+      campaignId: campaign.id,
+      campaignLeadId:
+        existingCampaignLead.id,
+    };
+  }
+
+  const {
+    data: campaignLead,
+    error: insertError,
+  } = await supabase
+    .from("campaign_leads")
+    .insert({
+      campaign_id: campaign.id,
+      advertiser_id: advertiser.id,
+      status: "pending",
+      follow_up_count: 0,
+      failure_reason: null,
+    })
+    .select()
+    .single();
+
+  if (insertError) {
+    throw new Error(
+      `Campaign enrollment failed: ${insertError.message}`
+    );
+  }
+
+  console.log(
+    `AUTO ENROLLED: ${advertiser.company_name} → ${campaign.name}`
+  );
+
+  return {
+    enrolled: true,
+    campaignId: campaign.id,
+    campaignName: campaign.name,
+    campaignLeadId: campaignLead.id,
+  };
+}
+/* ========================================
+   SAVE SCAN RESULT
+======================================== */
+
 async function saveScanResult(result) {
   const websiteUrl =
     result.requestedUrl ||
@@ -579,9 +778,10 @@ async function saveScanResult(result) {
     );
   }
 
-  const website = await getWebsiteByUrl(
-    normalizedWebsiteUrl
-  );
+  const website =
+    await getWebsiteByUrl(
+      normalizedWebsiteUrl
+    );
 
   if (!website) {
     throw new Error(
@@ -649,6 +849,7 @@ async function saveScanResult(result) {
   const scanAdvertisers = [];
 
   let createdAdvertisements = 0;
+
   let updatedAdvertisements = 0;
 
   for (
@@ -667,12 +868,17 @@ async function saveScanResult(result) {
     const advertisementResult =
       await upsertAdvertisement({
         advertiser,
+
         masterAdvertiser,
+
         website,
+
         scan,
       });
 
-    if (advertisementResult.created) {
+    if (
+      advertisementResult.created
+    ) {
       createdAdvertisements += 1;
     } else {
       updatedAdvertisements += 1;
@@ -700,96 +906,435 @@ async function saveScanResult(result) {
         null,
 
       creative_url:
-        advertiser.creativeUrl || null,
+        advertiser.creativeUrl ||
+        null,
 
       source_text:
-        advertiser.sourceText || null,
+        advertiser.sourceText ||
+        null,
 
       confidence:
-        advertiser.confidence || null,
+        advertiser.confidence ||
+        null,
 
       candidate_score:
-        advertiser.candidateScore || null,
+        advertiser.candidateScore ||
+        null,
 
       landing_page_resolved:
         Boolean(
           advertiser.companyDomain ||
-            advertiser.landingPageResolved
+            advertiser
+              .landingPageResolved
         ),
     });
   }
 
-  if (scanAdvertisers.length > 0) {
+  if (
+    scanAdvertisers.length > 0
+  ) {
     const {
-      error: advertisersError,
+      error: scanAdvertisersError,
     } = await supabase
       .from("scan_advertisers")
       .insert(scanAdvertisers);
 
-    if (advertisersError) {
+    if (scanAdvertisersError) {
       throw new Error(
-        `Failed to save scan advertisers: ${advertisersError.message}`
+        `Failed to save scan advertisers: ${scanAdvertisersError.message}`
       );
     }
   }
 
-  const {
-    error: websiteUpdateError,
-  } = await supabase
-    .from("websites")
-    .update({
-      last_scanned_at:
-        new Date().toISOString(),
-
-      next_scan_at: new Date(
-        Date.now() +
-          Number(
-            website.scan_frequency_minutes ||
-              60
-          ) *
-            60 *
-            1000
-      ).toISOString(),
-
-      scan_status: result.success
-        ? "completed"
-        : "failed",
-
-      total_ads_found:
-        Number(
-          website.total_ads_found || 0
-        ) + scanAdvertisers.length,
-    })
-    .eq("id", website.id);
-
-  if (websiteUpdateError) {
-    throw new Error(
-      `Failed to update website: ${websiteUpdateError.message}`
-    );
-  }
-
   console.log(
-    `Saved scan ${scan.id}: ${scanAdvertisers.length} advertisers`
+    `Scan stored: ${website.name}`
   );
 
   console.log(
-    `Advertisements: ${createdAdvertisements} created, ${updatedAdvertisements} updated`
+    `Advertisers processed: ${scanAdvertisers.length}`
+  );
+
+  console.log(
+    `Advertisements created: ${createdAdvertisements}`
+  );
+
+  console.log(
+    `Advertisements updated: ${updatedAdvertisements}`
+  );
+
+  /*
+   * ========================================
+   * ADVERTISER INTELLIGENCE + OUTREACH
+   * ========================================
+   *
+   * Every verified advertiser detected:
+   *
+   * 1. Discover contact
+   * 2. Save contact
+   * 3. Score lead
+   * 4. Save intelligence
+   * 5. If valid email exists:
+   *    auto-enroll into active campaign
+   *
+   * Hot / Warm / Cold DOES NOT block
+   * campaign enrollment.
+   */
+
+  const intelligenceResults = [];
+
+  for (
+    const scanAdvertiser
+    of scanAdvertisers
+  ) {
+    const advertiserId =
+      scanAdvertiser.advertiser_id;
+
+    try {
+      const {
+        data: advertiser,
+        error: advertiserError,
+      } = await supabase
+        .from("advertisers")
+        .select("*")
+        .eq("id", advertiserId)
+        .single();
+
+      if (
+        advertiserError ||
+        !advertiser
+      ) {
+        throw new Error(
+          advertiserError?.message ||
+            "Advertiser not found"
+        );
+      }
+
+      console.log(
+        "\n================================"
+      );
+
+      console.log(
+        `Processing advertiser intelligence: ${advertiser.company_name}`
+      );
+
+      /*
+       * CONTACT DISCOVERY
+       */
+
+      let discoveredContact = null;
+
+      try {
+        discoveredContact =
+          await discoverContacts(
+            advertiser,
+            website.domain
+          );
+
+        console.log(
+          `Contact discovery completed: ${advertiser.company_name}`
+        );
+      } catch (error) {
+        console.error(
+          `Contact discovery failed for ${advertiser.company_name}:`,
+          error.message
+        );
+      }
+
+      /*
+       * CONTACT STORAGE
+       */
+
+      if (discoveredContact) {
+        try {
+          await saveDiscoveredContact(
+            discoveredContact
+          );
+
+          console.log(
+            `Contact storage completed: ${advertiser.company_name}`
+          );
+        } catch (error) {
+          console.error(
+            `Contact storage failed for ${advertiser.company_name}:`,
+            error.message
+          );
+        }
+      }
+
+      /*
+       * LEAD INTELLIGENCE
+       *
+       * Score is intelligence only.
+       * It does not control outreach.
+       */
+
+      const qualification =
+        qualifyLead(
+          advertiser,
+          discoveredContact
+        );
+
+      /*
+       * UPDATE ADVERTISER INTELLIGENCE
+       */
+
+      const {
+        error: qualificationError,
+      } = await supabase
+        .from("advertisers")
+        .update({
+          lead_score:
+            qualification.leadScore,
+
+          lead_priority:
+            qualification.leadPriority,
+
+          qualification_status:
+            qualification
+              .qualificationStatus,
+
+          qualification_reason:
+            qualification
+              .qualificationReason,
+
+          qualified_at:
+            qualification.qualifiedAt,
+        })
+        .eq("id", advertiser.id);
+
+      if (qualificationError) {
+        throw new Error(
+          `Advertiser intelligence update failed: ${qualificationError.message}`
+        );
+      }
+
+      console.log(
+        `Advertiser intelligence updated: ${advertiser.company_name}`
+      );
+
+      console.log(
+        `Score: ${qualification.leadScore}`
+      );
+
+      console.log(
+        `Priority: ${qualification.leadPriority}`
+      );
+
+      console.log(
+        `Qualification status: ${qualification.qualificationStatus}`
+      );
+
+      /*
+       * AUTO CAMPAIGN ENROLLMENT
+       *
+       * Valid advertiser email is the
+       * outreach gate.
+       */
+
+      let enrollmentResult = {
+        enrolled: false,
+        reason: "email_missing",
+      };
+
+      if (
+        discoveredContact?.email
+      ) {
+        enrollmentResult =
+          await autoEnrollAdvertiser({
+            advertiser,
+            discoveredContact,
+          });
+      }
+
+      intelligenceResults.push({
+        advertiserId:
+          advertiser.id,
+
+        companyName:
+          advertiser.company_name,
+
+        contactDiscovered:
+          Boolean(discoveredContact),
+
+        email:
+          discoveredContact?.email ||
+          null,
+
+        leadScore:
+          qualification.leadScore,
+
+        leadPriority:
+          qualification.leadPriority,
+
+        qualificationStatus:
+          qualification
+            .qualificationStatus,
+
+        campaignEnrolled:
+          enrollmentResult.enrolled,
+
+        campaignEnrollmentReason:
+          enrollmentResult.reason ||
+          null,
+
+        campaignId:
+          enrollmentResult.campaignId ||
+          null,
+
+        campaignName:
+          enrollmentResult.campaignName ||
+          null,
+
+        campaignLeadId:
+          enrollmentResult
+            .campaignLeadId ||
+          null,
+
+        success: true,
+      });
+    } catch (error) {
+      console.error(
+        `Advertiser intelligence failed for ${advertiserId}:`,
+        error.message
+      );
+
+      intelligenceResults.push({
+        advertiserId,
+
+        success: false,
+
+        error: error.message,
+      });
+    }
+  }
+    /*
+   * ========================================
+   * FINAL SCAN SUMMARY
+   * ========================================
+   */
+
+  const campaignEnrolledCount =
+    intelligenceResults.filter(
+      (result) =>
+        result.success === true &&
+        result.campaignEnrolled === true
+    ).length;
+
+  const reachableAdvertiserCount =
+    intelligenceResults.filter(
+      (result) =>
+        result.success === true &&
+        Boolean(result.email)
+    ).length;
+
+  const failedIntelligenceCount =
+    intelligenceResults.filter(
+      (result) =>
+        result.success === false
+    ).length;
+
+  console.log(
+    "\n================================"
+  );
+
+  console.log(
+    "SCAN STORAGE SUMMARY"
+  );
+
+  console.log(
+    "================================"
+  );
+
+  console.log(
+    `Website: ${website.name}`
+  );
+
+  console.log(
+    `Advertisers detected: ${scanAdvertisers.length}`
+  );
+
+  console.log(
+    `Reachable advertisers: ${reachableAdvertiserCount}`
+  );
+
+  console.log(
+    `Auto-enrolled advertisers: ${campaignEnrolledCount}`
+  );
+
+  console.log(
+    `Intelligence failures: ${failedIntelligenceCount}`
+  );
+
+  console.log(
+    "================================\n"
   );
 
   return {
+    success: true,
+
     scanId: scan.id,
 
     websiteId: website.id,
 
-    savedAdvertisers:
+    websiteName: website.name,
+
+    advertisersProcessed:
       scanAdvertisers.length,
 
-    createdAdvertisements,
+    advertiserCount:
+      scanAdvertisers.length,
 
-    updatedAdvertisements,
+    advertisementsCreated:
+      createdAdvertisements,
+
+    advertisementsUpdated:
+      updatedAdvertisements,
+
+    reachableAdvertisers:
+      reachableAdvertiserCount,
+
+    campaignEnrolled:
+      campaignEnrolledCount,
+
+    intelligenceFailures:
+      failedIntelligenceCount,
+
+    intelligenceResults,
   };
 }
 
+/* ========================================
+   EXPORTS
+======================================== */
+
 module.exports = {
+  normalizeDomain,
+
+  normalizeWebsiteUrl,
+
+  normalizeText,
+
+  normalizeAdType,
+
+  getAdvertiserDomain,
+
+  getAdvertiserName,
+
+  getLandingPage,
+
+  prepareAdvertisers,
+
+  createAdvertisementFingerprint,
+
+  getWebsiteByUrl,
+
+  upsertMasterAdvertiser,
+
+  upsertAdvertisement,
+
+  getActiveCampaign,
+
+  autoEnrollAdvertiser,
+
   saveScanResult,
 };

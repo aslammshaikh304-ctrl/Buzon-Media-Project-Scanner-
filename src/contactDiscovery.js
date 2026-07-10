@@ -40,11 +40,69 @@ function normalizeUrl(value) {
     return new URL(value).href;
   } catch {
     try {
-      return new URL(`https://${value}`).href;
+      return new URL(
+        `https://${value}`
+      ).href;
     } catch {
       return null;
     }
   }
+}
+
+function normalizeDomain(value) {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    return new URL(
+      String(value).includes("://")
+        ? String(value)
+        : `https://${value}`
+    ).hostname
+      .replace(/^www\./, "")
+      .toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function getRootDomain(value) {
+  const domain = normalizeDomain(value);
+
+  if (!domain) {
+    return null;
+  }
+
+  const parts = domain.split(".");
+
+  if (parts.length < 2) {
+    return domain;
+  }
+
+  const secondLevelDomains = new Set([
+    "co.uk",
+    "com.au",
+    "co.in",
+    "co.jp",
+    "com.br",
+    "com.sg",
+    "com.mx",
+    "co.nz",
+  ]);
+
+  const lastTwo = parts
+    .slice(-2)
+    .join(".");
+
+  if (
+    secondLevelDomains.has(lastTwo) &&
+    parts.length >= 3
+  ) {
+    return parts.slice(-3).join(".");
+  }
+
+  return lastTwo;
 }
 
 function normalizeEmail(value) {
@@ -59,7 +117,49 @@ function normalizeEmail(value) {
     .split("?")[0];
 }
 
-function isValidEmail(email) {
+function getEmailDomain(email) {
+  const normalizedEmail =
+    normalizeEmail(email);
+
+  if (
+    !normalizedEmail ||
+    !normalizedEmail.includes("@")
+  ) {
+    return null;
+  }
+
+  return normalizeDomain(
+    normalizedEmail.split("@")[1]
+  );
+}
+
+function isPublisherEmail(
+  email,
+  publisherDomain
+) {
+  const emailDomain =
+    getEmailDomain(email);
+
+  const publisherRoot =
+    getRootDomain(publisherDomain);
+
+  const emailRoot =
+    getRootDomain(emailDomain);
+
+  if (
+    !emailRoot ||
+    !publisherRoot
+  ) {
+    return false;
+  }
+
+  return emailRoot === publisherRoot;
+}
+
+function isValidEmail(
+  email,
+  publisherDomain = null
+) {
   if (!email) {
     return false;
   }
@@ -67,7 +167,9 @@ function isValidEmail(email) {
   if (
     BLOCKED_EMAIL_EXTENSIONS.some(
       (extension) =>
-        email.toLowerCase().endsWith(extension)
+        email
+          .toLowerCase()
+          .endsWith(extension)
     )
   ) {
     return false;
@@ -81,9 +183,26 @@ function isValidEmail(email) {
     return false;
   }
 
-  const domain = match[1].toLowerCase();
+  const domain =
+    match[1].toLowerCase();
 
-  if (BLOCKED_EMAIL_DOMAINS.has(domain)) {
+  if (
+    BLOCKED_EMAIL_DOMAINS.has(domain)
+  ) {
+    return false;
+  }
+
+  if (
+    publisherDomain &&
+    isPublisherEmail(
+      email,
+      publisherDomain
+    )
+  ) {
+    console.log(
+      `Publisher email rejected: ${email}`
+    );
+
     return false;
   }
 
@@ -116,7 +235,6 @@ function scoreEmail(email) {
 
   return scores[localPart] || 40;
 }
-
 function getSocialType(value) {
   if (!value) {
     return null;
@@ -124,6 +242,7 @@ function getSocialType(value) {
 
   try {
     const url = new URL(value);
+
     const hostname = url.hostname
       .toLowerCase()
       .replace(/^www\./, "");
@@ -157,7 +276,10 @@ function getSocialType(value) {
   }
 }
 
-function isContactPage(value, websiteUrl) {
+function isContactPage(
+  value,
+  websiteUrl
+) {
   if (!value) {
     return false;
   }
@@ -166,15 +288,21 @@ function isContactPage(value, websiteUrl) {
     const url = new URL(value);
     const website = new URL(websiteUrl);
 
-    if (url.protocol !== "http:" && url.protocol !== "https:") {
+    if (
+      url.protocol !== "http:" &&
+      url.protocol !== "https:"
+    ) {
       return false;
     }
 
-    if (url.hostname !== website.hostname) {
+    if (
+      url.hostname !== website.hostname
+    ) {
       return false;
     }
 
-    const path = url.pathname.toLowerCase();
+    const path =
+      url.pathname.toLowerCase();
 
     return CONTACT_PATH_KEYWORDS.some(
       (keyword) => {
@@ -194,20 +322,26 @@ function isContactPage(value, websiteUrl) {
 async function extractPageContacts(
   page,
   sourceUrl,
-  websiteUrl
+  websiteUrl,
+  publisherDomain
 ) {
   const data = await page.evaluate(() => {
     const bodyText =
       document.body?.innerText || "";
 
     const html =
-      document.documentElement?.innerHTML || "";
+      document.documentElement
+        ?.innerHTML || "";
 
     const links = Array.from(
-      document.querySelectorAll("a[href]")
+      document.querySelectorAll(
+        "a[href]"
+      )
     ).map((link) => ({
       href: link.href,
-      text: link.innerText?.trim() || "",
+
+      text:
+        link.innerText?.trim() || "",
     }));
 
     return {
@@ -231,8 +365,15 @@ async function extractPageContacts(
     const normalizedEmail =
       normalizeEmail(email);
 
-    if (isValidEmail(normalizedEmail)) {
-      emailCandidates.add(normalizedEmail);
+    if (
+      isValidEmail(
+        normalizedEmail,
+        publisherDomain
+      )
+    ) {
+      emailCandidates.add(
+        normalizedEmail
+      );
     }
   }
 
@@ -245,8 +386,15 @@ async function extractPageContacts(
       const normalizedEmail =
         normalizeEmail(link.href);
 
-      if (isValidEmail(normalizedEmail)) {
-        emailCandidates.add(normalizedEmail);
+      if (
+        isValidEmail(
+          normalizedEmail,
+          publisherDomain
+        )
+      ) {
+        emailCandidates.add(
+          normalizedEmail
+        );
       }
     }
   }
@@ -267,7 +415,8 @@ async function extractPageContacts(
       socialType &&
       !socials[socialType]
     ) {
-      socials[socialType] = link.href;
+      socials[socialType] =
+        link.href;
     }
 
     if (
@@ -286,21 +435,33 @@ async function extractPageContacts(
   )
     .map((email) => ({
       email,
+
       score: scoreEmail(email),
+
       sourceUrl,
     }))
-    .sort((a, b) => b.score - a.score);
+    .sort(
+      (a, b) =>
+        b.score - a.score
+    );
 
   return {
     emails,
+
     linkedin: socials.linkedin,
+
     telegram: socials.telegram,
+
     twitter: socials.twitter,
+
     contactFormUrl,
   };
 }
 
-function mergeContactData(current, next) {
+function mergeContactData(
+  current,
+  next
+) {
   const emailMap = new Map();
 
   for (const item of [
@@ -314,31 +475,42 @@ function mergeContactData(current, next) {
       !existing ||
       item.score > existing.score
     ) {
-      emailMap.set(item.email, item);
+      emailMap.set(
+        item.email,
+        item
+      );
     }
   }
 
   return {
     emails: Array.from(
       emailMap.values()
-    ).sort((a, b) => b.score - a.score),
+    ).sort(
+      (a, b) =>
+        b.score - a.score
+    ),
 
     linkedin:
-      current.linkedin || next.linkedin,
+      current.linkedin ||
+      next.linkedin,
 
     telegram:
-      current.telegram || next.telegram,
+      current.telegram ||
+      next.telegram,
 
     twitter:
-      current.twitter || next.twitter,
+      current.twitter ||
+      next.twitter,
 
     contactFormUrl:
       current.contactFormUrl ||
       next.contactFormUrl,
   };
 }
-
-async function discoverContacts(advertiser) {
+async function discoverContacts(
+  advertiser,
+  publisherDomain = null
+) {
   const websiteUrl = normalizeUrl(
     advertiser.website_url ||
       advertiser.domain
@@ -350,28 +522,87 @@ async function discoverContacts(advertiser) {
     );
   }
 
+  const advertiserDomain =
+    getRootDomain(websiteUrl);
+
+  const publisherRootDomain =
+    getRootDomain(publisherDomain);
+
   console.log(
     `Discovering contacts: ${advertiser.company_name}`
   );
+
+  console.log(
+    `Advertiser domain: ${advertiserDomain}`
+  );
+
+  console.log(
+    `Publisher domain: ${publisherRootDomain}`
+  );
+
+  if (
+    advertiserDomain &&
+    publisherRootDomain &&
+    advertiserDomain ===
+      publisherRootDomain
+  ) {
+    console.log(
+      `Contact discovery blocked: advertiser domain matches publisher domain (${advertiserDomain})`
+    );
+
+    return {
+      advertiserId: advertiser.id,
+
+      companyName:
+        advertiser.company_name,
+
+      email: null,
+
+      emailScore: 0,
+
+      linkedin: null,
+
+      telegram: null,
+
+      twitter: null,
+
+      contactFormUrl: null,
+
+      sourceUrl: websiteUrl,
+
+      allEmails: [],
+
+      visitedPages: [],
+
+      blockedReason:
+        "advertiser_domain_matches_publisher",
+    };
+  }
 
   const browser = await chromium.launch({
     headless: true,
   });
 
-  const context = await browser.newContext({
-    ignoreHTTPSErrors: true,
+  const context =
+    await browser.newContext({
+      ignoreHTTPSErrors: true,
 
-    userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/149 Safari/537.36",
-  });
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/149 Safari/537.36",
+    });
 
-  const page = await context.newPage();
+  const page =
+    await context.newPage();
 
   let contactData = {
     emails: [],
+
     linkedin: null,
+
     telegram: null,
+
     twitter: null,
+
     contactFormUrl: null,
   };
 
@@ -380,6 +611,7 @@ async function discoverContacts(advertiser) {
   try {
     await page.goto(websiteUrl, {
       waitUntil: "domcontentloaded",
+
       timeout: 30000,
     });
 
@@ -391,7 +623,8 @@ async function discoverContacts(advertiser) {
       await extractPageContacts(
         page,
         page.url(),
-        websiteUrl
+        websiteUrl,
+        publisherDomain
       );
 
     contactData = mergeContactData(
@@ -401,20 +634,28 @@ async function discoverContacts(advertiser) {
 
     const contactLinks =
       await page.evaluate(
-        ({ keywords, origin }) => {
+        ({
+          keywords,
+          origin,
+        }) => {
           return Array.from(
             document.querySelectorAll(
               "a[href]"
             )
           )
-            .map((link) => link.href)
+            .map(
+              (link) => link.href
+            )
             .filter((href) => {
               try {
-                const url = new URL(href);
+                const url =
+                  new URL(href);
 
                 if (
-                  url.protocol !== "http:" &&
-                  url.protocol !== "https:"
+                  url.protocol !==
+                    "http:" &&
+                  url.protocol !==
+                    "https:"
                 ) {
                   return false;
                 }
@@ -426,7 +667,8 @@ async function discoverContacts(advertiser) {
                 }
 
                 const path =
-                  url.pathname.toLowerCase();
+                  url.pathname
+                    .toLowerCase();
 
                 return keywords.some(
                   (keyword) => {
@@ -436,7 +678,9 @@ async function discoverContacts(advertiser) {
                         "i"
                       );
 
-                    return pattern.test(path);
+                    return pattern.test(
+                      path
+                    );
                   }
                 );
               } catch {
@@ -450,12 +694,19 @@ async function discoverContacts(advertiser) {
             CONTACT_PATH_KEYWORDS,
 
           origin:
-            new URL(websiteUrl).origin,
+            new URL(
+              websiteUrl
+            ).origin,
         }
       );
 
-    for (const contactUrl of contactLinks) {
-      if (visitedUrls.has(contactUrl)) {
+    for (
+      const contactUrl
+      of contactLinks
+    ) {
+      if (
+        visitedUrls.has(contactUrl)
+      ) {
         continue;
       }
 
@@ -463,23 +714,29 @@ async function discoverContacts(advertiser) {
 
       try {
         await page.goto(contactUrl, {
-          waitUntil: "domcontentloaded",
+          waitUntil:
+            "domcontentloaded",
+
           timeout: 20000,
         });
 
-        await page.waitForTimeout(1500);
+        await page.waitForTimeout(
+          1500
+        );
 
         const pageContacts =
           await extractPageContacts(
             page,
             page.url(),
-            websiteUrl
+            websiteUrl,
+            publisherDomain
           );
 
-        contactData = mergeContactData(
-          contactData,
-          pageContacts
-        );
+        contactData =
+          mergeContactData(
+            contactData,
+            pageContacts
+          );
       } catch {
         console.log(
           `Contact page failed: ${contactUrl}`
@@ -488,19 +745,23 @@ async function discoverContacts(advertiser) {
     }
 
     const primaryEmail =
-      contactData.emails[0] || null;
+      contactData.emails[0] ||
+      null;
 
     const result = {
-      advertiserId: advertiser.id,
+      advertiserId:
+        advertiser.id,
 
       companyName:
         advertiser.company_name,
 
       email:
-        primaryEmail?.email || null,
+        primaryEmail?.email ||
+        null,
 
       emailScore:
-        primaryEmail?.score || 0,
+        primaryEmail?.score ||
+        0,
 
       linkedin:
         contactData.linkedin,
