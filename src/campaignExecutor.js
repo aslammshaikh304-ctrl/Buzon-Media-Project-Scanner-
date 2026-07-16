@@ -2,6 +2,7 @@ const { supabase } = require("./supabase");
 
 const {
   sendEmail,
+  getAvailableSmtpAccount,
 } = require("./emailSender");
 
 const DEFAULT_FOLLOW_UP_DELAY_DAYS = 3;
@@ -47,7 +48,23 @@ async function getPendingCampaignLeads(
 
   return data || [];
 }
+async function getEmailTemplate(templateId) {
+  if (!templateId) {
+    return null;
+  }
 
+  const { data, error } = await supabase
+    .from("email_templates")
+    .select("*")
+    .eq("id", templateId)
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
 function getPrimaryContact(advertiser) {
   const contacts =
     advertiser?.contacts || [];
@@ -158,65 +175,45 @@ async function markLeadFailed(
   );
 }
 
-function createOutreachEmail({
+function replaceVariables(
+  text,
   advertiser,
-  campaign,
-}) {
-  const companyName =
-    advertiser.company_name ||
-    advertiser.domain ||
-    "there";
+  contact,
+  smtp
+) {
+  if (!text) {
+    return "";
+  }
 
-  const subject =
-    `Advertising partnership with ${companyName}`;
-
-  const text = `Hi,
-
-I came across ${companyName} while researching active advertisers in the crypto space.
-
-We work with crypto-focused companies looking to expand their advertising reach across relevant websites and audiences.
-
-I wanted to see if advertising partnerships are something your team is currently exploring.
-
-If yes, I would be happy to share more details.
-
-Best regards`;
-
-  const html = `
-    <p>Hi,</p>
-
-    <p>
-      I came across <strong>${companyName}</strong>
-      while researching active advertisers in the
-      crypto space.
-    </p>
-
-    <p>
-      We work with crypto-focused companies looking
-      to expand their advertising reach across
-      relevant websites and audiences.
-    </p>
-
-    <p>
-      I wanted to see if advertising partnerships
-      are something your team is currently exploring.
-    </p>
-
-    <p>
-      If yes, I would be happy to share more details.
-    </p>
-
-    <p>
-      Best regards
-    </p>
-  `;
-
-  return {
-    subject,
-    text,
-    html,
-    campaignName: campaign.name,
-  };
+  return text
+    .replaceAll(
+      "{{company}}",
+      advertiser?.company_name || ""
+    )
+    .replaceAll(
+      "{{website}}",
+      advertiser?.website_url ||
+        advertiser?.domain ||
+        ""
+    )
+    .replaceAll(
+      "{{publisher}}",
+      advertiser?.publisher || ""
+    )
+    .replaceAll(
+      "{{contact}}",
+      contact?.name || ""
+    )
+    .replaceAll(
+      "{{email}}",
+      contact?.email || ""
+    )
+    .replaceAll(
+      "{{sender}}",
+      smtp?.sender_name ||
+        smtp?.name ||
+        ""
+    );
 }
 
 async function processCampaignLead(
@@ -274,11 +271,61 @@ async function processCampaignLead(
     };
   }
 
-  const emailContent =
-    createOutreachEmail({
-      advertiser,
-      campaign,
-    });
+  /*
+ * Load campaign template
+ */
+
+const template =
+  await getEmailTemplate(
+    campaign.template_id
+  );
+
+if (!template) {
+  throw new Error(
+    "Campaign template not found."
+  );
+}
+
+/*
+ * Load preferred SMTP account
+ */
+
+const smtp =
+  await getAvailableSmtpAccount(
+    campaign.smtp_account_id
+  );
+
+if (!smtp) {
+  throw new Error(
+    "No SMTP account available."
+  );
+}
+
+/*
+ * Build email
+ */
+
+const subject =
+  replaceVariables(
+    template.subject,
+    advertiser,
+    contact,
+    smtp
+  );
+
+const html =
+  replaceVariables(
+    template.body,
+    advertiser,
+    contact,
+    smtp
+  );
+
+const text =
+  html
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
   console.log(
     "Advertiser:",
@@ -304,11 +351,18 @@ async function processCampaignLead(
     "Sending outreach email..."
   );
 
-  const sendResult = await sendEmail({
+  const sendResult =
+  await sendEmail({
+    preferredSmtpAccountId:
+      campaign.smtp_account_id,
+
     to: contact.email,
-    subject: emailContent.subject,
-    text: emailContent.text,
-    html: emailContent.html,
+
+    subject,
+
+    text,
+
+    html,
   });
 
   if (sendResult.success) {
@@ -452,6 +506,17 @@ async function executeCampaign(campaign) {
   }
 
   return results;
+}
+async function getEmailTemplate(templateId) {
+  const { data, error } = await supabase
+    .from("email_templates")
+    .select("*")
+    .eq("id", templateId)
+    .single();
+
+  if (error) throw error;
+
+  return data;
 }
 
 async function runCampaignExecutor() {
