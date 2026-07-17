@@ -9,6 +9,9 @@ const { supabase } = require("./supabase");
 const {
   decryptSmtpPassword,
 } = require("./smtpCrypto");
+const {
+  forwardReply,
+} = require("./replyForwarding");
 
 /* ========================================
    GET IMAP ACCOUNTS
@@ -560,6 +563,7 @@ async function processMessage({
       fromEmail,
     };
   }
+}
 
   const existingReply =
     await findReplyThread({
@@ -577,7 +581,34 @@ async function processMessage({
     console.log(
       `Thread reply detected from ${fromEmail}`
     );
+const {
+  data: advertiser,
+} = await supabase
+  .from("advertisers")
+  .select("*")
+  .eq(
+    "id",
+    context.campaignLead.advertiser_id
+  )
+  .single();
 
+const {
+  data: campaign,
+} = await supabase
+  .from("campaigns")
+  .select("*")
+  .eq(
+    "id",
+    context.campaignLead.campaign_id
+  )
+  .single();
+
+await forwardReply({
+  reply: existingReply,
+  parsed,
+  advertiser,
+  campaign,
+});
     return {
       status: "thread_message_saved",
 
@@ -593,28 +624,59 @@ async function processMessage({
   }
 
   const reply =
-    await saveInitialReply({
-      account,
-      parsed,
-      context,
-    });
+  await saveInitialReply({
+    account,
+    parsed,
+    context,
+  });
 
-  console.log(
-    `Initial reply detected from ${fromEmail}`
-  );
+/*
+ * Forward reply to sales team
+ */
 
-  return {
-    status: "saved",
+const {
+  data: advertiser,
+} = await supabase
+  .from("advertisers")
+  .select("*")
+  .eq(
+    "id",
+    context.campaignLead.advertiser_id
+  )
+  .single();
 
-    replyId: reply.id,
+const {
+  data: campaign,
+} = await supabase
+  .from("campaigns")
+  .select("*")
+  .eq(
+    "id",
+    context.campaignLead.campaign_id
+  )
+  .single();
 
-    campaignLeadId:
-      context.campaignLead.id,
+await forwardReply({
+  reply,
+  parsed,
+  advertiser,
+  campaign,
+});
 
-    fromEmail,
-  };
-}
+console.log(
+  `Initial reply detected from ${fromEmail}`
+);
 
+return {
+  status: "saved",
+
+  replyId: reply.id,
+
+  campaignLeadId:
+    context.campaignLead.id,
+
+  fromEmail,
+};
 /* ========================================
    CHECK ACCOUNT REPLIES
 ======================================== */
