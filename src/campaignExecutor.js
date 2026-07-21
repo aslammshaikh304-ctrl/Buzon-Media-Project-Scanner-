@@ -575,7 +575,6 @@ module.exports = {
   getPendingCampaignLeads,
   getPrimaryContact,
   getFirstFollowUpAt,
-  createOutreachEmail,
   processCampaignLead,
   executeCampaign,
   runCampaignExecutor,

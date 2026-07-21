@@ -563,7 +563,6 @@ async function processMessage({
       fromEmail,
     };
   }
-}
 
   const existingReply =
     await findReplyThread({
@@ -677,6 +676,8 @@ return {
 
   fromEmail,
 };
+}
+
 /* ========================================
    CHECK ACCOUNT REPLIES
 ======================================== */

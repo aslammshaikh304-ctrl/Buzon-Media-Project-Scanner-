@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const { assertPublicHttpUrl, requireApiKey } = require("./security");
 
 const { supabase } = require("./supabase");
 
@@ -42,7 +43,7 @@ const AUTOMATION_INTERVAL_MS =
 
 app.use(
   cors({
-    origin: "http://localhost:3000",
+    origin: (process.env.ALLOWED_ORIGINS || "https://dashboard.buzon.dev").split(","),
 
     methods: [
       "GET",
@@ -60,7 +61,7 @@ app.use(
   })
 );
 
-app.use(express.json());
+app.use(express.json({ limit: "100kb" }));
 
 /* ========================================
    HEALTH
@@ -79,6 +80,8 @@ app.get("/health", (req, res) => {
       new Date().toISOString(),
   });
 });
+
+app.use(requireApiKey);
 
 /* ========================================
    MANUAL WEBSITE SCAN
@@ -100,8 +103,10 @@ app.post("/scan", async (req, res) => {
   }
 
   try {
+    const safeUrl = await assertPublicHttpUrl(url);
+
     const result = await scanWebsite({
-      url,
+      url: safeUrl,
       waitTimeMs,
       maxScrolls,
     });
@@ -757,6 +762,10 @@ app.post(
 let automationInterval = null;
 
 async function startAutomation() {
+  if (process.env.ENABLE_AUTOMATION !== "true") {
+    console.log("Automation is disabled (set ENABLE_AUTOMATION=true to enable it)");
+    return;
+  }
   console.log(
     `Automation interval: ${AUTOMATION_INTERVAL_MS}ms`
   );
